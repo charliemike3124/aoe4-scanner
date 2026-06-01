@@ -21,12 +21,17 @@ const BATCH_SIZE = 50;
 const REQUEST_DELAY_MS = 4000;
 const MAX_GAME_PAGES_PER_BATCH = 2;
 const MAX_GAME_REQUESTS_PER_SCAN = 4;
+const ADAPTIVE_MAX_GAME_REQUESTS_PER_SCAN = 8;
+const MIN_FRESH_GAMES_BEFORE_STOPPING = 40;
 const MAX_GAMES_PER_SCAN = 100;
 const GAMES_TO_SAVE_PER_SCAN = 5;
 const SUMMARY_FINALIST_COUNT = 5;
+const ELITE_SUMMARY_PROBE_COUNT = 3;
 const MIN_GAME_DURATION_SECONDS = 8 * 60;
 const MIN_SCORE = 32;
+const ELITE_MMR = 2000;
 const CANDIDATE_LOOKBACK_HOURS = 48;
+const IGNORED_GAME_TTL_HOURS = 24;
 const PRIMARY_LOOKBACK_HOURS = 6;
 
 type AnyRecord = Record<string, unknown>;
@@ -81,6 +86,18 @@ type Reason = {
 };
 
 type ScoredCandidate = { game: AoeGame } & ReturnType<typeof scoreGame>;
+
+type FetchDiagnostics = {
+  apiRequestsMade: number;
+  rawGamesFetched: number;
+  skippedAlreadyExcluded: number;
+  skippedLowRating: number;
+  skippedInvalid: number;
+  freshGamesCollected: number;
+  startPlayerOffset: number;
+  nextPlayerOffset: number;
+  playerBatchesChecked: number;
+};
 
 const SCALING_CIVS = new Set(["abbasid_dynasty", "chinese", "byzantines", "zhu_xis_legacy", "jin_dynasty"]);
 const TEMPO_CIVS = new Set(["french", "mongols", "english", "jeanne_darc", "ottomans"]);
@@ -224,25 +241,47 @@ function addReason(reasons: Reason[], tags: Set<string>, type: string, label: st
   tags.add(tag);
 }
 
+function gamePlayerIds(game: AoeGame) {
+  return game.players.map((player) => player.profileId).filter(Boolean);
+}
+
+function minimumPlayerMmr(game: AoeGame) {
+  const mmrs = game.players.map((player) => player.mmr).filter((mmr): mmr is number => mmr != null);
+  return mmrs.length >= 2 ? Math.min(...mmrs) : null;
+}
+
+function isMirrorMatch(game: AoeGame) {
+  const civs = game.players.map((player) => player.civilization).filter(Boolean);
+  return civs.length === 2 && civs[0] === civs[1];
+}
+
+function isEliteGame(game: AoeGame, minimumMmr = ELITE_MMR) {
+  const mmrs = game.players.map((player) => player.mmr);
+  return mmrs.length >= 2 && mmrs.every((mmr) => mmr != null && mmr >= minimumMmr);
+}
+
+function eliteBaselineWeight(game: AoeGame) {
+  const minimumMmr = minimumPlayerMmr(game);
+  if (minimumMmr == null) return 0;
+  if (minimumMmr >= 2200) return 32;
+  if (minimumMmr >= 2100) return 24;
+  if (minimumMmr >= 2000) return 16;
+  return 0;
+}
+
 function scoreGame(game: AoeGame, civStats: Map<string, CivStat>) {
   const reasons: Reason[] = [];
   const tags = new Set<string>();
   const winner = game.players.find((player) => player.result === "win");
   const loser = game.players.find((player) => player.result === "loss");
-  const civs = game.players.map((player) => player.civilization).filter(Boolean);
 
-  if (civs.length === 2 && civs[0] === civs[1]) {
+  if (isMirrorMatch(game)) {
     return { score: 0, reasons, tags: [] };
   }
 
   if (winner && loser) {
-    const winnerRating = winner.rating;
-    const loserRating = loser.rating;
     const winnerMmr = winner.mmr;
     const loserMmr = loser.mmr;
-    if (winnerRating != null && loserRating != null && winnerRating - loserRating >= 150) {
-      return { score: 0, reasons, tags: [] };
-    }
     if (winnerMmr != null && loserMmr != null && winnerMmr - loserMmr >= 150) {
       return { score: 0, reasons, tags: [] };
     }
@@ -259,6 +298,7 @@ function scoreGame(game: AoeGame, civStats: Map<string, CivStat>) {
   if (winner && loser) {
     const winnerStat = winner.civilization ? civStats.get(winner.civilization) : undefined;
     const loserStat = loser.civilization ? civStats.get(loser.civilization) : undefined;
+    const eliteWeight = eliteBaselineWeight(game);
     matchupStats = {
       winnerCivilization: winner.civilization,
       loserCivilization: loser.civilization,
@@ -267,6 +307,9 @@ function scoreGame(game: AoeGame, civStats: Map<string, CivStat>) {
       loserWinRate: loserStat?.winRate ?? null,
     };
 
+    if (eliteWeight) {
+      addReason(reasons, tags, "elite_match", `Elite match with both players at ${minimumPlayerMmr(game)}+ MMR`, eliteWeight, "Elite match");
+    }
     if (winner.mmr != null && loser.mmr != null && winner.mmr < loser.mmr) {
       const diff = loser.mmr - winner.mmr;
       if (diff >= 400) addReason(reasons, tags, "insane_mmr_upset", `Underdog winner was down ${diff} MMR`, 62, "Insane upset");
@@ -281,6 +324,9 @@ function scoreGame(game: AoeGame, civStats: Map<string, CivStat>) {
         addReason(reasons, tags, "very_low_winrate_civ_win", `${winner.civilization} has ${winnerStat.winRate.toFixed(1)}% overall win rate`, 24, "Low win-rate civ");
       } else if (winnerStat.winRate < 48) {
         addReason(reasons, tags, "low_winrate_civ_win", `${winner.civilization} has ${winnerStat.winRate.toFixed(1)}% overall win rate`, 16, "Low win-rate civ");
+      }
+      if (eliteWeight && winnerStat.winRate < 48) {
+        addReason(reasons, tags, "elite_low_winrate_civ_bonus", `Elite win with a ${winnerStat.winRate.toFixed(1)}% overall win-rate civilization`, 8, "Elite civ angle");
       }
     }
   }
@@ -310,6 +356,58 @@ function scoreCandidates(games: AoeGame[], civStats: Map<string, CivStat>) {
     .sort((a, b) => b.score - a.score || b.game.startedAt.getTime() - a.game.startedAt.getTime());
 }
 
+function eliteSummaryProbeCandidates(games: AoeGame[], civStats: Map<string, CivStat>, scored: ScoredCandidate[]) {
+  const scoredIds = new Set(scored.map((candidate) => candidate.game.aoe4worldGameId));
+  return games
+    .map((game) => ({ game, ...scoreGame(game, civStats) }))
+    .filter((candidate) => {
+      if (scoredIds.has(candidate.game.aoe4worldGameId)) return false;
+      if (!isEliteGame(candidate.game)) return false;
+      if (isMirrorMatch(candidate.game)) return false;
+      const duration = candidate.game.durationSeconds ?? 0;
+      return duration >= 18 * 60 || duration <= 12 * 60 || duration >= 45 * 60;
+    })
+    .sort((a, b) => {
+      const mmrDiff = (b.game.averageMmr ?? 0) - (a.game.averageMmr ?? 0);
+      if (mmrDiff) return mmrDiff;
+      return b.game.startedAt.getTime() - a.game.startedAt.getTime();
+    })
+    .slice(0, ELITE_SUMMARY_PROBE_COUNT);
+}
+
+function mergeCandidates(candidates: ScoredCandidate[]) {
+  const byGameId = new Map<string, ScoredCandidate>();
+  for (const candidate of candidates) {
+    const existing = byGameId.get(candidate.game.aoe4worldGameId);
+    if (!existing || candidate.score > existing.score) byGameId.set(candidate.game.aoe4worldGameId, candidate);
+  }
+  return Array.from(byGameId.values()).sort((a, b) => b.score - a.score || b.game.startedAt.getTime() - a.game.startedAt.getTime());
+}
+
+function selectDiverseCandidates(candidates: ScoredCandidate[], count: number) {
+  const selected: ScoredCandidate[] = [];
+  const usedPlayerIds = new Set<string>();
+  const selectedGameIds = new Set<string>();
+
+  for (const candidate of candidates) {
+    const playerIds = gamePlayerIds(candidate.game);
+    if (playerIds.some((profileId) => usedPlayerIds.has(profileId))) continue;
+    selected.push(candidate);
+    selectedGameIds.add(candidate.game.aoe4worldGameId);
+    playerIds.forEach((profileId) => usedPlayerIds.add(profileId));
+    if (selected.length >= count) return selected;
+  }
+
+  for (const candidate of candidates) {
+    if (selectedGameIds.has(candidate.game.aoe4worldGameId)) continue;
+    selected.push(candidate);
+    selectedGameIds.add(candidate.game.aoe4worldGameId);
+    if (selected.length >= count) break;
+  }
+
+  return selected;
+}
+
 async function findUnsavedCandidates<T extends { game: AoeGame }>(candidates: T[], count: number) {
   const unsaved: T[] = [];
   for (const candidate of candidates) {
@@ -334,7 +432,7 @@ async function rememberRejectedGames(games: AoeGame[], scored: ScoredCandidate[]
   if (!rejected.length) return 0;
 
   const batch = db.batch();
-  const expiresAt = Timestamp.fromDate(new Date(Date.now() + CANDIDATE_LOOKBACK_HOURS * 60 * 60 * 1000));
+  const expiresAt = Timestamp.fromDate(new Date(Date.now() + IGNORED_GAME_TTL_HOURS * 60 * 60 * 1000));
   rejected.slice(0, 100).forEach((game) => {
     batch.set(
       IGNORED_COLLECTION.doc(game.aoe4worldGameId),
@@ -606,10 +704,13 @@ function addContextualMatchupReason(candidate: ScoredCandidate, matchupStats: Ma
   } else if (matchupStat.winRate < 47) {
     addSummaryReason(candidate, "contextual_matchup_upset", `${winner.civilization} has ${matchupStat.winRate.toFixed(1)}% win rate vs ${loser.civilization}${context}`, 14, "Matchup upset");
   }
+  if (isEliteGame(candidate.game) && matchupStat.winRate < 47) {
+    addSummaryReason(candidate, "elite_bad_matchup_bonus", "Elite-level win in a difficult matchup", 8, "Elite matchup");
+  }
 }
 
 async function enrichFinalistsWithSummaries(candidates: ScoredCandidate[], matchupStats: Map<string, MatchupStat>) {
-  const finalists = candidates.slice(0, SUMMARY_FINALIST_COUNT);
+  const finalists = candidates;
   for (const candidate of finalists) {
     const summary = await fetchGameSummary(candidate.game);
     if (summary) {
@@ -626,6 +727,9 @@ async function enrichFinalistsWithSummaries(candidates: ScoredCandidate[], match
           } else if (mapStat.winRate < 47) {
             addSummaryReason(candidate, "map_disadvantage_win", `${winner.civilization} has ${mapStat.winRate.toFixed(1)}% win rate on ${candidate.game.map ?? "this map"}`, 18, "Map disadvantage");
           }
+          if (isEliteGame(candidate.game) && mapStat.winRate < 47) {
+            addSummaryReason(candidate, "elite_map_disadvantage_bonus", "Elite-level win on a difficult map for the winner's civilization", 8, "Elite map angle");
+          }
         }
       }
       addContextualMatchupReason(candidate, matchupStats, mapStat);
@@ -638,6 +742,29 @@ async function enrichFinalistsWithSummaries(candidates: ScoredCandidate[], match
 async function enrichCandidateWithSummary(candidate: ScoredCandidate, matchupStats: Map<string, MatchupStat>) {
   const enriched = await enrichFinalistsWithSummaries([candidate], matchupStats);
   return enriched[0] ?? candidate;
+}
+
+async function selectOutlierCandidates(games: AoeGame[], civStats: Map<string, CivStat>, matchupStats: Map<string, MatchupStat>) {
+  const baseCandidates = scoreCandidates(games, civStats);
+  const eliteProbes = eliteSummaryProbeCandidates(games, civStats, baseCandidates);
+  const unsavedBase = await findUnsavedCandidates(baseCandidates, SUMMARY_FINALIST_COUNT);
+  const unsavedEliteProbes = await findUnsavedCandidates(eliteProbes, ELITE_SUMMARY_PROBE_COUNT);
+  const finalists = mergeCandidates([...unsavedBase, ...unsavedEliteProbes]);
+  const enrichedFinalists = await enrichFinalistsWithSummaries(finalists, matchupStats);
+  const qualified = mergeCandidates([...baseCandidates, ...enrichedFinalists]).filter((candidate) => candidate.score >= MIN_SCORE);
+  const selected = selectDiverseCandidates(
+    qualified.filter((candidate) => finalists.some((finalist) => finalist.game.aoe4worldGameId === candidate.game.aoe4worldGameId)),
+    GAMES_TO_SAVE_PER_SCAN,
+  );
+
+  return {
+    baseCandidates,
+    eliteProbes,
+    finalists,
+    enrichedFinalists,
+    qualified,
+    selected,
+  };
 }
 
 async function refreshTrackedPlayersIfNeeded(force = false) {
@@ -706,11 +833,43 @@ async function loadMatchupStats() {
   return stats;
 }
 
-async function fetchCandidateGames(profileIds: string[], since: Date, excludedGameIds = new Set<string>()) {
+function rotateProfileIds(profileIds: string[], offset: number) {
+  if (!profileIds.length) return [];
+  const start = Math.max(0, offset) % profileIds.length;
+  return [...profileIds.slice(start), ...profileIds.slice(0, start)];
+}
+
+function nextPlayerOffset(startOffset: number, batchesChecked: number, playerCount: number) {
+  if (!playerCount) return 0;
+  return (startOffset + batchesChecked * BATCH_SIZE) % playerCount;
+}
+
+async function fetchCandidateGames(profileIds: string[], since: Date, excludedGameIds = new Set<string>(), startPlayerOffset = 0) {
   const games = new Map<string, AoeGame>();
-  let requests = 0;
-  for (let index = 0; index < profileIds.length; index += BATCH_SIZE) {
-    const batch = profileIds.slice(index, index + BATCH_SIZE);
+  const normalizedStartOffset = profileIds.length ? Math.max(0, startPlayerOffset) % profileIds.length : 0;
+  const rotatedProfileIds = rotateProfileIds(profileIds, normalizedStartOffset);
+  const diagnostics: FetchDiagnostics = {
+    apiRequestsMade: 0,
+    rawGamesFetched: 0,
+    skippedAlreadyExcluded: 0,
+    skippedLowRating: 0,
+    skippedInvalid: 0,
+    freshGamesCollected: 0,
+    startPlayerOffset: normalizedStartOffset,
+    nextPlayerOffset: normalizedStartOffset,
+    playerBatchesChecked: 0,
+  };
+
+  function shouldStopRequesting() {
+    if (games.size >= MAX_GAMES_PER_SCAN) return true;
+    if (diagnostics.apiRequestsMade >= ADAPTIVE_MAX_GAME_REQUESTS_PER_SCAN) return true;
+    return diagnostics.apiRequestsMade >= MAX_GAME_REQUESTS_PER_SCAN && games.size >= MIN_FRESH_GAMES_BEFORE_STOPPING;
+  }
+
+  for (let index = 0; index < rotatedProfileIds.length; index += BATCH_SIZE) {
+    const batch = rotatedProfileIds.slice(index, index + BATCH_SIZE);
+    diagnostics.playerBatchesChecked += 1;
+    diagnostics.nextPlayerOffset = nextPlayerOffset(normalizedStartOffset, diagnostics.playerBatchesChecked, profileIds.length);
     const base = new URL(`${API_BASE}/games`);
     base.searchParams.set("leaderboard", "rm_1v1");
     base.searchParams.set("since", since.toISOString());
@@ -721,27 +880,42 @@ async function fetchCandidateGames(profileIds: string[], since: Date, excludedGa
     for (let page = 1; page <= MAX_GAME_PAGES_PER_BATCH; page += 1) {
       const url = new URL(base);
       url.searchParams.set("page", String(page));
-      requests += 1;
+      diagnostics.apiRequestsMade += 1;
       const payload = await fetchJson<{ games?: unknown[]; count?: number; per_page?: number }>(url);
-      for (const rawGame of arrayValue(payload.games)) {
+      const rawGames = arrayValue(payload.games);
+      diagnostics.rawGamesFetched += rawGames.length;
+      for (const rawGame of rawGames) {
         const rawId = stringValue(record(rawGame).game_id, record(rawGame).id, record(rawGame).match_id);
-        if (rawId && excludedGameIds.has(rawId)) continue;
+        if (rawId && excludedGameIds.has(rawId)) {
+          diagnostics.skippedAlreadyExcluded += 1;
+          continue;
+        }
         const game = normalizeGame(rawGame);
-        if (!game) continue;
-        if (excludedGameIds.has(game.aoe4worldGameId)) continue;
-        if ((game.averageRating ?? 0) < MIN_RATING && (game.averageMmr ?? 0) < MIN_RATING) continue;
+        if (!game) {
+          diagnostics.skippedInvalid += 1;
+          continue;
+        }
+        if (excludedGameIds.has(game.aoe4worldGameId)) {
+          diagnostics.skippedAlreadyExcluded += 1;
+          continue;
+        }
+        if ((game.averageRating ?? 0) < MIN_RATING && (game.averageMmr ?? 0) < MIN_RATING) {
+          diagnostics.skippedLowRating += 1;
+          continue;
+        }
         games.set(game.aoe4worldGameId, game);
-        if (games.size >= MAX_GAMES_PER_SCAN) return Array.from(games.values()).slice(0, MAX_GAMES_PER_SCAN);
+        diagnostics.freshGamesCollected = games.size;
+        if (games.size >= MAX_GAMES_PER_SCAN) return { games: Array.from(games.values()).slice(0, MAX_GAMES_PER_SCAN), diagnostics };
       }
       if ((payload.count ?? 0) < (payload.per_page ?? 50)) break;
-      if (requests >= MAX_GAME_REQUESTS_PER_SCAN) break;
+      if (shouldStopRequesting()) break;
       await sleep(REQUEST_DELAY_MS);
     }
-    if (requests >= MAX_GAME_REQUESTS_PER_SCAN) break;
-    if (games.size >= MAX_GAMES_PER_SCAN) break;
+    if (shouldStopRequesting()) break;
     await sleep(REQUEST_DELAY_MS);
   }
-  return Array.from(games.values()).slice(0, MAX_GAMES_PER_SCAN);
+  diagnostics.freshGamesCollected = games.size;
+  return { games: Array.from(games.values()).slice(0, MAX_GAMES_PER_SCAN), diagnostics };
 }
 
 async function pruneExpiredFallback() {
@@ -822,28 +996,31 @@ async function runScan(forcePlayers = false, options: { allowDeepFallback?: bool
       loadMatchupStats(),
     ]);
     const excludedGameIds = await loadExcludedGameIds();
+    const scanStateSnapshot = await SCAN_STATE_DOC.get();
+    const scanState = scanStateSnapshot.data();
+    const startPlayerOffset = intValue(scanState?.nextPlayerOffset) ?? 0;
 
-    const primaryGames = await fetchCandidateGames(profileIds, primarySince, excludedGameIds);
+    const primaryFetch = await fetchCandidateGames(profileIds, primarySince, excludedGameIds, startPlayerOffset);
+    const primaryGames = primaryFetch.games;
     let games = primaryGames;
-    let scored = scoreCandidates(primaryGames, civStats);
-    let rejectedCached = await rememberRejectedGames(primaryGames, scored);
-    let finalists = await findUnsavedCandidates(scored, SUMMARY_FINALIST_COUNT);
-    let selected = (await enrichFinalistsWithSummaries(finalists, matchupStats)).slice(0, GAMES_TO_SAVE_PER_SCAN);
+    let fetchDiagnostics = primaryFetch.diagnostics;
+    let selection = await selectOutlierCandidates(primaryGames, civStats, matchupStats);
+    let rejectedCached = await rememberRejectedGames(primaryGames, selection.qualified);
     let lookbackHours = PRIMARY_LOOKBACK_HOURS;
     let expanded = false;
 
-    if (options.allowDeepFallback !== false && selected.length < GAMES_TO_SAVE_PER_SCAN) {
-      const expandedGames = await fetchCandidateGames(profileIds, expandedSince, excludedGameIds);
+    if (options.allowDeepFallback !== false && selection.selected.length < GAMES_TO_SAVE_PER_SCAN) {
+      const expandedFetch = await fetchCandidateGames(profileIds, expandedSince, excludedGameIds, startPlayerOffset);
+      const expandedGames = expandedFetch.games;
       games = expandedGames;
-      scored = scoreCandidates(expandedGames, civStats);
-      rejectedCached = await rememberRejectedGames(expandedGames, scored);
-      finalists = await findUnsavedCandidates(scored, SUMMARY_FINALIST_COUNT);
-      selected = (await enrichFinalistsWithSummaries(finalists, matchupStats)).slice(0, GAMES_TO_SAVE_PER_SCAN);
+      fetchDiagnostics = expandedFetch.diagnostics;
+      selection = await selectOutlierCandidates(expandedGames, civStats, matchupStats);
+      rejectedCached = await rememberRejectedGames(expandedGames, selection.qualified);
       lookbackHours = CANDIDATE_LOOKBACK_HOURS;
       expanded = true;
     }
 
-    for (const candidate of selected) {
+    for (const candidate of selection.selected) {
       const expiresAt = new Date(candidate.game.startedAt.getTime() + 14 * 24 * 60 * 60 * 1000);
       await OUTLIER_COLLECTION.doc(candidate.game.aoe4worldGameId).set({
         ...candidate.game,
@@ -859,31 +1036,53 @@ async function runScan(forcePlayers = false, options: { allowDeepFallback?: bool
     }
 
     const now = FieldValue.serverTimestamp();
-    const selectedGameIds = selected.map((candidate) => candidate.game.aoe4worldGameId);
+    const selectedGameIds = selection.selected.map((candidate) => candidate.game.aoe4worldGameId);
     await markFreshPicks(selectedGameIds);
-    const message = selected.length
-      ? `Stored ${selected.length} games: ${selectedGameIds.join(", ")}.`
-      : scored.length
-        ? `Found ${scored.length} scored candidates, but none were selected after filtering.`
+    const message = selection.selected.length
+      ? `Stored ${selection.selected.length} games: ${selectedGameIds.join(", ")}.`
+      : selection.qualified.length
+        ? `Found ${selection.qualified.length} qualified candidates, but none were selected after filtering.`
         : `No candidate crossed score ${MIN_SCORE}.`;
     await Promise.all([
-      SCAN_STATE_DOC.set({ lastCursor: now, lastCheckedSince: Timestamp.fromDate(expanded ? expandedSince : primarySince) }, { merge: true }),
+      SCAN_STATE_DOC.set(
+        {
+          lastCursor: now,
+          lastCheckedSince: Timestamp.fromDate(expanded ? expandedSince : primarySince),
+          nextPlayerOffset: fetchDiagnostics.nextPlayerOffset,
+        },
+        { merge: true },
+      ),
       PUBLIC_STATUS_DOC.set({ lastSuccessfulScanAt: now, lastScanMessage: message, trackedPlayers: profileIds.length }, { merge: true }),
       scanRef.set(
         {
           status: "success",
           finishedAt: now,
           gamesChecked: games.length,
-          candidatesFound: scored.length,
+          candidatesFound: selection.qualified.length,
+          baseCandidatesFound: selection.baseCandidates.length,
+          eliteProbesChecked: selection.eliteProbes.length,
+          qualifiedAfterSummary: selection.qualified.length,
           lookbackHours,
           expandedLookback: expanded,
           primaryGamesChecked: primaryGames.length,
           selectedGameId: selectedGameIds[0] ?? null,
           selectedGameIds,
-          storedCount: selected.length,
-          summaryFinalistsChecked: finalists.length,
+          storedCount: selection.selected.length,
+          summaryFinalistsChecked: selection.finalists.length,
           excludedGames: excludedGameIds.size,
           rejectedCached,
+          apiRequestsMade: fetchDiagnostics.apiRequestsMade,
+          primaryApiRequestsMade: primaryFetch.diagnostics.apiRequestsMade,
+          rawGamesFetched: fetchDiagnostics.rawGamesFetched,
+          primaryRawGamesFetched: primaryFetch.diagnostics.rawGamesFetched,
+          skippedAlreadyExcluded: fetchDiagnostics.skippedAlreadyExcluded,
+          skippedLowRating: fetchDiagnostics.skippedLowRating,
+          skippedInvalid: fetchDiagnostics.skippedInvalid,
+          freshGamesCollected: fetchDiagnostics.freshGamesCollected,
+          startPlayerOffset: fetchDiagnostics.startPlayerOffset,
+          nextPlayerOffset: fetchDiagnostics.nextPlayerOffset,
+          playerBatchesChecked: fetchDiagnostics.playerBatchesChecked,
+          ignoredGameTtlHours: IGNORED_GAME_TTL_HOURS,
           message,
         },
         { merge: true },
@@ -893,16 +1092,31 @@ async function runScan(forcePlayers = false, options: { allowDeepFallback?: bool
     return {
       ok: true,
       gamesChecked: games.length,
-      candidatesFound: scored.length,
+      candidatesFound: selection.qualified.length,
+      baseCandidatesFound: selection.baseCandidates.length,
+      eliteProbesChecked: selection.eliteProbes.length,
+      qualifiedAfterSummary: selection.qualified.length,
       lookbackHours,
       expandedLookback: expanded,
       primaryGamesChecked: primaryGames.length,
       selectedGameId: selectedGameIds[0] ?? null,
       selectedGameIds,
-      storedCount: selected.length,
-      summaryFinalistsChecked: finalists.length,
+      storedCount: selection.selected.length,
+      summaryFinalistsChecked: selection.finalists.length,
       excludedGames: excludedGameIds.size,
       rejectedCached,
+      apiRequestsMade: fetchDiagnostics.apiRequestsMade,
+      primaryApiRequestsMade: primaryFetch.diagnostics.apiRequestsMade,
+      rawGamesFetched: fetchDiagnostics.rawGamesFetched,
+      primaryRawGamesFetched: primaryFetch.diagnostics.rawGamesFetched,
+      skippedAlreadyExcluded: fetchDiagnostics.skippedAlreadyExcluded,
+      skippedLowRating: fetchDiagnostics.skippedLowRating,
+      skippedInvalid: fetchDiagnostics.skippedInvalid,
+      freshGamesCollected: fetchDiagnostics.freshGamesCollected,
+      startPlayerOffset: fetchDiagnostics.startPlayerOffset,
+      nextPlayerOffset: fetchDiagnostics.nextPlayerOffset,
+      playerBatchesChecked: fetchDiagnostics.playerBatchesChecked,
+      ignoredGameTtlHours: IGNORED_GAME_TTL_HOURS,
     };
   } catch (error) {
     const message = error instanceof Error ? error.message : "Unknown scan error";
