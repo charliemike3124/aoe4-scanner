@@ -86,7 +86,7 @@ type Reason = {
   weight: number;
 };
 
-type ScoredCandidate = { game: AoeGame; summaryAvailable?: boolean } & ReturnType<typeof scoreGame>;
+type ScoredCandidate = { game: AoeGame; summaryAvailable?: boolean; summaryUrl?: string | null } & ReturnType<typeof scoreGame>;
 
 type FetchDiagnostics = {
   apiRequestsMade: number;
@@ -663,7 +663,11 @@ async function fetchGameSummary(game: AoeGame) {
     try {
       const url = new URL(`https://aoe4world.com/players/${profileId}/games/${game.aoe4worldGameId}/summary`);
       url.searchParams.set("camelize", "true");
-      return await fetchJson<unknown>(url, 1);
+      const summary = await fetchJson<unknown>(url, 1);
+      return {
+        summary,
+        summaryUrl: `https://aoe4world.com/players/${profileId}/games/${game.aoe4worldGameId}`,
+      };
     } catch (error) {
       logger.debug("Game summary fetch skipped", { gameId: game.aoe4worldGameId, profileId, error });
     }
@@ -726,11 +730,12 @@ function addContextualMatchupReason(candidate: ScoredCandidate, matchupStats: Ma
 async function enrichFinalistsWithSummaries(candidates: ScoredCandidate[], matchupStats: Map<string, MatchupStat>) {
   const finalists: ScoredCandidate[] = candidates;
   for (const candidate of finalists) {
-    const summary = await fetchGameSummary(candidate.game);
-    candidate.summaryAvailable = Boolean(summary);
-    if (summary) {
-      analyzeSummary(candidate, summary);
-      const payload = record(summary);
+    const summaryResult = await fetchGameSummary(candidate.game);
+    candidate.summaryAvailable = Boolean(summaryResult);
+    candidate.summaryUrl = summaryResult?.summaryUrl ?? null;
+    if (summaryResult) {
+      analyzeSummary(candidate, summaryResult.summary);
+      const payload = record(summaryResult.summary);
       const mapId = candidate.game.mapId ?? intValue(payload.mapId, payload.map_id);
       const winner = candidate.game.players.find((player) => player.result === "win");
       let mapStat: CivStat | null = null;
@@ -1045,6 +1050,7 @@ async function runScan(forcePlayers = false, options: { allowDeepFallback?: bool
         expiresAt: Timestamp.fromDate(expiresAt),
         score: candidate.score,
         summaryAvailable: candidate.summaryAvailable ?? null,
+        summaryUrl: candidate.summaryUrl ?? null,
         reasons: candidate.reasons,
         tags: candidate.tags,
         matchupStats: candidate.matchupStats,
@@ -1054,7 +1060,7 @@ async function runScan(forcePlayers = false, options: { allowDeepFallback?: bool
     const now = FieldValue.serverTimestamp();
     const selectedGameIds = selection.selected.map((candidate) => candidate.game.aoe4worldGameId);
     const selectedGameUrls = Object.fromEntries(
-      selection.selected.map((candidate) => [candidate.game.aoe4worldGameId, candidate.game.aoe4worldUrl]),
+      selection.selected.map((candidate) => [candidate.game.aoe4worldGameId, candidate.summaryUrl ?? candidate.game.aoe4worldUrl]),
     );
     await markFreshPicks(selectedGameIds);
     const message = selection.selected.length
@@ -1198,7 +1204,7 @@ async function rescoreSavedOutliers(dryRun = true) {
     OUTLIER_COLLECTION.where("expiresAt", ">=", Timestamp.fromDate(new Date())).limit(250).get(),
   ]);
 
-  const kept: Array<{ id: string; oldScore: number; newScore: number }> = [];
+  const kept: Array<{ id: string; oldScore: number; newScore: number; summaryAvailable: boolean | null; summaryUrl: string | null }> = [];
   const removed: Array<{ id: string; oldScore: number; newScore: number; reasons: string[] }> = [];
   const skipped: Array<{ id: string; error: string }> = [];
   const batch = db.batch();
@@ -1209,7 +1215,7 @@ async function rescoreSavedOutliers(dryRun = true) {
       const data = record(doc.data());
       const game = storedGameFromData(doc.id, data);
       const baseScore = scoreGame(game, civStats);
-      let candidate = { game, ...baseScore };
+      let candidate: ScoredCandidate = { game, ...baseScore };
       if (candidate.score >= MIN_SCORE) candidate = await enrichCandidateWithSummary(candidate, matchupStats);
 
       const oldScore = Number(data.score ?? 0);
@@ -1225,12 +1231,20 @@ async function rescoreSavedOutliers(dryRun = true) {
           writes += 1;
         }
       } else {
-        kept.push({ id: doc.id, oldScore, newScore: candidate.score });
+        kept.push({
+          id: doc.id,
+          oldScore,
+          newScore: candidate.score,
+          summaryAvailable: candidate.summaryAvailable ?? null,
+          summaryUrl: candidate.summaryUrl ?? null,
+        });
         if (!dryRun) {
           batch.set(
             doc.ref,
             {
               score: candidate.score,
+              summaryAvailable: candidate.summaryAvailable ?? null,
+              summaryUrl: candidate.summaryUrl ?? null,
               reasons: candidate.reasons,
               tags: candidate.tags,
               matchupStats: candidate.matchupStats ?? null,

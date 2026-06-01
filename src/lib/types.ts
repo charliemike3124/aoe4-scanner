@@ -36,6 +36,7 @@ export type OutlierGame = {
   score: number;
   isFreshPick?: boolean;
   summaryAvailable?: boolean | null;
+  summaryUrl?: string | null;
   reasons: OutlierReason[];
   tags: string[];
   civilizations: string[];

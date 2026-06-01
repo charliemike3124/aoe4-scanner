@@ -26,6 +26,7 @@ export function outlierFromSnapshot(snapshot: QueryDocumentSnapshot<DocumentData
     score: Number(data.score ?? 0),
     isFreshPick: Boolean(data.isFreshPick),
     summaryAvailable: typeof data.summaryAvailable === "boolean" ? data.summaryAvailable : null,
+    summaryUrl: typeof data.summaryUrl === "string" ? data.summaryUrl : null,
     reasons: Array.isArray(data.reasons) ? data.reasons : [],
     tags: Array.isArray(data.tags) ? data.tags : [],
     civilizations: Array.isArray(data.civilizations) ? data.civilizations : [],

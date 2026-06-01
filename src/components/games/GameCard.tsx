@@ -79,7 +79,7 @@ export function GameCard({
   const [bookmarked, setBookmarked] = useState(false);
   const [expanded, setExpanded] = useState(false);
   const summaryUnavailable = outlier.summaryAvailable === false;
-  const aoe4worldHref = summaryUnavailable ? playerPageUrl(players[0]) : outlier.aoe4worldUrl;
+  const aoe4worldHref = summaryUnavailable ? playerPageUrl(players[0]) : outlier.summaryUrl ?? outlier.aoe4worldUrl;
   const visibleReasons = expanded ? outlier.reasons : outlier.reasons.slice(0, 3);
 
   useEffect(() => {
