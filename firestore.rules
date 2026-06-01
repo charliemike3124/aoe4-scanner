@@ -13,7 +13,7 @@ service cloud.firestore {
     }
 
     match /meta/{docId} {
-      allow read: if docId == "publicStatus";
+      allow read: if docId in ["publicStatus", "homepageHighlights"];
       allow write: if false;
     }
 

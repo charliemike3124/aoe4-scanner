@@ -44,13 +44,26 @@ function serializeGame(game: OutlierGame) {
   };
 }
 
-function hydrateGame(game: ReturnType<typeof serializeGame>): OutlierGame {
+function hydrateDate(value: unknown): Date {
+  if (value instanceof Date) return value;
+  if (typeof value === 'string' || typeof value === 'number') return new Date(value);
+  if (value && typeof value === 'object') {
+    const maybeTimestamp = value as { toDate?: () => Date; seconds?: number; nanoseconds?: number };
+    if (typeof maybeTimestamp.toDate === 'function') return maybeTimestamp.toDate();
+    if (typeof maybeTimestamp.seconds === 'number') {
+      return new Date(maybeTimestamp.seconds * 1000 + Math.floor((maybeTimestamp.nanoseconds ?? 0) / 1000000));
+    }
+  }
+  return new Date(0);
+}
+
+function hydrateGame(game: ReturnType<typeof serializeGame> | Record<string, unknown>): OutlierGame {
   return {
     ...game,
-    startedAt: new Date(game.startedAt),
-    selectedAt: new Date(game.selectedAt),
-    expiresAt: new Date(game.expiresAt),
-  };
+    startedAt: hydrateDate(game.startedAt),
+    selectedAt: hydrateDate(game.selectedAt),
+    expiresAt: hydrateDate(game.expiresAt),
+  } as OutlierGame;
 }
 
 function readBookmarks() {
@@ -90,20 +103,127 @@ function newestPickedFirst(a: OutlierGame, b: OutlierGame) {
   return b.selectedAt.getTime() - a.selectedAt.getTime() || b.startedAt.getTime() - a.startedAt.getTime();
 }
 
+type Highlight = {
+  label: string;
+  game: OutlierGame;
+};
+
+const COMEBACK_REASON_PATTERNS = [
+  'comeback',
+  'villager_deficit',
+  'resource_deficit',
+  'lost_multiple_landmarks',
+  'won_after_losing_tc',
+  'lost_tc',
+];
+
+function winnerAndLoser(game: OutlierGame) {
+  return {
+    winner: game.players.find((player) => player.result?.toLowerCase() === 'win'),
+    loser: game.players.find((player) => player.result?.toLowerCase() === 'loss'),
+  };
+}
+
+function underdogMmrDiff(game: OutlierGame) {
+  const { winner, loser } = winnerAndLoser(game);
+  if (winner?.mmr == null || loser?.mmr == null || winner.mmr >= loser.mmr) return 0;
+  return loser.mmr - winner.mmr;
+}
+
+function isEliteSavedGame(game: OutlierGame) {
+  const mmrs = game.players.map((player) => player.mmr);
+  return mmrs.length >= 2 && mmrs.every((mmr) => mmr != null && mmr >= 2000);
+}
+
+function hasComebackSignal(game: OutlierGame) {
+  return game.reasons.some((reason) => {
+    const haystack = `${reason.type} ${reason.label}`.toLowerCase();
+    return COMEBACK_REASON_PATTERNS.some((pattern) => haystack.includes(pattern));
+  });
+}
+
+function bestBy(games: OutlierGame[], score: (game: OutlierGame) => number) {
+  return [...games].sort((a, b) => score(b) - score(a) || b.score - a.score || b.selectedAt.getTime() - a.selectedAt.getTime())[0] ?? null;
+}
+
+function selectHighlights(games: OutlierGame[]) {
+  const selectedIds = new Set<string>();
+  const highlights: Highlight[] = [];
+
+  function add(label: string, game: OutlierGame | null) {
+    if (!game || selectedIds.has(game.id)) return;
+    selectedIds.add(game.id);
+    highlights.push({ label, game });
+  }
+
+  add('Highest Score', bestBy(games.filter((game) => game.score >= 100), (game) => game.score));
+  add('Best Comeback', bestBy(games.filter((game) => !selectedIds.has(game.id) && hasComebackSignal(game)), (game) => game.score));
+  add('Best Pro Match', bestBy(games.filter((game) => !selectedIds.has(game.id) && isEliteSavedGame(game)), (game) => game.score));
+  add('Biggest Upset', bestBy(games.filter((game) => !selectedIds.has(game.id) && underdogMmrDiff(game) >= 150), underdogMmrDiff));
+
+  return highlights;
+}
+
+function HighlightsSection({
+  highlights,
+  spoilerLight,
+  lastSeenAt,
+}: {
+  highlights: Highlight[];
+  spoilerLight: boolean;
+  lastSeenAt: number;
+}) {
+  return (
+    <section className='space-y-3'>
+      <div>
+        <h2 className='text-xl font-black text-white'>Highlights</h2>
+        <p className='text-sm text-slate-400'>Quick picks from the currently saved outlier games.</p>
+      </div>
+      <div className='space-y-4'>
+        {highlights.map((highlight) => (
+          <div key={`${highlight.label}-${highlight.game.id}`} className='space-y-2'>
+            <span className='inline-flex rounded-full border border-gold/25 bg-gold/10 px-2.5 py-1 text-xs font-bold uppercase tracking-wide text-gold'>
+              {highlight.label}
+            </span>
+            <GameCard
+              outlier={highlight.game}
+              spoilerLight={spoilerLight}
+              isNew={highlight.game.selectedAt.getTime() > lastSeenAt}
+            />
+          </div>
+        ))}
+      </div>
+    </section>
+  );
+}
+
 function cacheKey(mode: FeedMode, pageSize?: number) {
   return `${CACHE_PREFIX}${JSON.stringify({ mode, pageSize })}`;
+}
+
+function highlightFromData(entry: unknown): Highlight | null {
+  if (!entry || typeof entry !== 'object') return null;
+  const data = entry as { label?: unknown; game?: unknown };
+  if (typeof data.label !== 'string' || !data.game || typeof data.game !== 'object') return null;
+  return {
+    label: data.label,
+    game: hydrateGame(data.game as Record<string, unknown>),
+  };
 }
 
 export function OutlierFeed({
   mode,
   filters = {},
   pageSize,
+  showHighlights = false,
 }: {
   mode: FeedMode;
   filters?: FeedFilters;
   pageSize?: number;
+  showHighlights?: boolean;
 }) {
   const [games, setGames] = useState<OutlierGame[]>([]);
+  const [savedHighlights, setSavedHighlights] = useState<Highlight[]>([]);
   const [status, setStatus] = useState<PublicStatus>({});
   const [loading, setLoading] = useState(true);
   const [error, setError] = useState<string | null>(null);
@@ -137,6 +257,7 @@ export function OutlierFeed({
           const parsed = JSON.parse(cached) as {
             storedAt: number;
             games: ReturnType<typeof serializeGame>[];
+            highlights?: Array<{ label: string; game: ReturnType<typeof serializeGame> }>;
             status: {
               lastSuccessfulScanAt?: string | null;
               lastScanMessage?: string | null;
@@ -145,6 +266,7 @@ export function OutlierFeed({
           };
           if (Date.now() - parsed.storedAt < CACHE_TTL_MS) {
             setGames(parsed.games.map(hydrateGame));
+            setSavedHighlights(parsed.highlights?.map((highlight) => ({ label: highlight.label, game: hydrateGame(highlight.game) })) ?? []);
             setStatus({
               ...parsed.status,
               lastSuccessfulScanAt: parsed.status.lastSuccessfulScanAt
@@ -156,23 +278,33 @@ export function OutlierFeed({
           }
         }
 
+        const fetchLimit = pageSize ?? (mode === 'latest' ? 10 : 250);
         const clauses = [
           orderBy('selectedAt', 'desc'),
-          limit(pageSize ?? (mode === 'latest' ? 10 : 250)),
+          limit(fetchLimit),
         ];
         const gamesQuery = query(collection(db, 'outlierGames'), ...clauses);
-        const [snapshot, statusSnapshot] = await Promise.all([
+        const highlightPromise = showHighlights
+          ? getDoc(doc(db, 'meta', 'homepageHighlights')).catch(() => null)
+          : Promise.resolve(null);
+        const [snapshot, statusSnapshot, highlightsSnapshot] = await Promise.all([
           getDocs(gamesQuery),
           getDoc(doc(db, 'meta', 'publicStatus')),
+          highlightPromise,
         ]);
         if (cancelled) return;
         const nextGames = snapshot.docs.map((gameDoc) => outlierFromSnapshot(gameDoc)).sort(newestPickedFirst);
         const nextStatus = statusFromData(statusSnapshot.data());
+        const nextHighlights =
+          highlightsSnapshot?.exists()
+            ? ((highlightsSnapshot.data().highlights ?? []) as unknown[]).map(highlightFromData).filter((highlight): highlight is Highlight => Boolean(highlight))
+            : [];
         localStorage.setItem(
           key,
           JSON.stringify({
             storedAt: Date.now(),
             games: nextGames.map(serializeGame),
+            highlights: nextHighlights.map((highlight) => ({ label: highlight.label, game: serializeGame(highlight.game) })),
             status: {
               ...nextStatus,
               lastSuccessfulScanAt: nextStatus.lastSuccessfulScanAt?.toISOString() ?? null,
@@ -180,6 +312,7 @@ export function OutlierFeed({
           }),
         );
         setGames(nextGames);
+        setSavedHighlights(nextHighlights);
         setStatus(nextStatus);
       } catch (caught) {
         if (!cancelled)
@@ -201,6 +334,11 @@ export function OutlierFeed({
   const visibleGames = useMemo(
     () => games.filter((game) => matchesClientFilters(game, filters, bookmarks)).sort(newestPickedFirst),
     [bookmarks, filters, games],
+  );
+  const feedGames = useMemo(() => (mode === 'latest' && pageSize ? visibleGames.slice(0, pageSize) : visibleGames), [mode, pageSize, visibleGames]);
+  const highlights = useMemo(
+    () => (showHighlights ? (savedHighlights.length ? savedHighlights : selectHighlights(games)) : []),
+    [games, savedHighlights, showHighlights],
   );
 
   useEffect(() => {
@@ -229,8 +367,8 @@ export function OutlierFeed({
 
   const countLabel =
     mode === 'latest'
-      ? `Showing ${visibleGames.length} latest games (Updated hourly)`
-      : `${visibleGames.length} matching games`;
+      ? `Showing ${feedGames.length} latest games (Updated hourly)`
+      : `${feedGames.length} matching games`;
 
   if (loading) {
     return <EmptyState title='Loading outliers' description='Fetching the latest saved games.' />;
@@ -242,33 +380,40 @@ export function OutlierFeed({
 
   return (
     <div className='space-y-4'>
-      <div className='flex flex-wrap items-center justify-between gap-3 text-sm text-slate-400'>
-        <span>{countLabel}</span>
-        <div className='flex flex-wrap items-center gap-3'>
-          <span>Last successful scan: {lastScan}</span>
-          <label className='flex items-center gap-2 rounded-md border border-white/10 bg-slate-950/60 px-2.5 py-1.5 text-slate-300'>
-            <input
-              type='checkbox'
-              checked={spoilerLight}
-              onChange={toggleSpoilerLight}
-              className='h-4 w-4 accent-sky-400'
-            />
-            Spoiler-light
-          </label>
-        </div>
-      </div>
-      {visibleGames.length ? (
-        <div className='space-y-4'>
-          {visibleGames.map((outlier) => (
-            <GameCard
-              key={outlier.id}
-              outlier={outlier}
-              spoilerLight={spoilerLight}
-              isNew={outlier.selectedAt.getTime() > lastSeenAt}
-            />
-          ))}
-          <ScrollToTopButton />
-        </div>
+      {highlights.length ? <HighlightsSection highlights={highlights} spoilerLight={spoilerLight} lastSeenAt={lastSeenAt} /> : null}
+      {feedGames.length ? (
+        <section className='space-y-3'>
+          <div>
+            <h2 className='text-xl font-black text-white'>Latest games</h2>
+            <p className='text-sm text-slate-400'>The newest outlier games saved by the scanner.</p>
+          </div>
+          <div className='flex flex-wrap items-center justify-between gap-3 text-sm text-slate-400'>
+            <span>{countLabel}</span>
+            <div className='flex flex-wrap items-center gap-3'>
+              <span>Last successful scan: {lastScan}</span>
+              <label className='flex items-center gap-2 rounded-md border border-white/10 bg-slate-950/60 px-2.5 py-1.5 text-slate-300'>
+                <input
+                  type='checkbox'
+                  checked={spoilerLight}
+                  onChange={toggleSpoilerLight}
+                  className='h-4 w-4 accent-sky-400'
+                />
+                Spoiler-light
+              </label>
+            </div>
+          </div>
+          <div className='space-y-4'>
+            {feedGames.map((outlier) => (
+              <GameCard
+                key={outlier.id}
+                outlier={outlier}
+                spoilerLight={spoilerLight}
+                isNew={outlier.selectedAt.getTime() > lastSeenAt}
+              />
+            ))}
+            <ScrollToTopButton />
+          </div>
+        </section>
       ) : (
         <EmptyState
           title='No outlier games saved yet'

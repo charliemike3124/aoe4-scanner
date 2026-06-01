@@ -13,6 +13,7 @@ const TRACKED_PLAYERS_DOC = db.collection("meta").doc("trackedPlayers");
 const SCAN_STATE_DOC = db.collection("meta").doc("scanState");
 const SCAN_LOCK_DOC = db.collection("meta").doc("scanLock");
 const PUBLIC_STATUS_DOC = db.collection("meta").doc("publicStatus");
+const HOMEPAGE_HIGHLIGHTS_DOC = db.collection("meta").doc("homepageHighlights");
 const OUTLIER_COLLECTION = db.collection("outlierGames");
 const IGNORED_COLLECTION = db.collection("ignoredGames");
 const MIN_RATING = 1700;
@@ -87,6 +88,18 @@ type Reason = {
 };
 
 type ScoredCandidate = { game: AoeGame; summaryAvailable?: boolean; summaryUrl?: string | null } & ReturnType<typeof scoreGame>;
+type StoredOutlierGame = AoeGame & {
+  id: string;
+  selectedAt: Date;
+  expiresAt: Date;
+  score: number;
+  summaryAvailable: boolean | null;
+  summaryUrl: string | null;
+  reasons: Reason[];
+  tags: string[];
+  matchupStats: ScoredCandidate["matchupStats"] | null;
+  isFreshPick?: boolean;
+};
 
 type FetchDiagnostics = {
   apiRequestsMade: number;
@@ -407,6 +420,74 @@ function selectDiverseCandidates(candidates: ScoredCandidate[], count: number) {
   }
 
   return selected;
+}
+
+const COMEBACK_REASON_PATTERNS = [
+  "comeback",
+  "villager_deficit",
+  "resource_deficit",
+  "lost_multiple_landmarks",
+  "won_after_losing_tc",
+  "lost_tc",
+];
+
+function storedWinnerAndLoser(game: Pick<StoredOutlierGame, "players">) {
+  return {
+    winner: game.players.find((player) => player.result?.toLowerCase() === "win"),
+    loser: game.players.find((player) => player.result?.toLowerCase() === "loss"),
+  };
+}
+
+function storedUnderdogMmrDiff(game: Pick<StoredOutlierGame, "players">) {
+  const { winner, loser } = storedWinnerAndLoser(game);
+  if (winner?.mmr == null || loser?.mmr == null || winner.mmr >= loser.mmr) return 0;
+  return loser.mmr - winner.mmr;
+}
+
+function isStoredEliteGame(game: Pick<StoredOutlierGame, "players">) {
+  const mmrs = game.players.map((player) => player.mmr);
+  return mmrs.length >= 2 && mmrs.every((mmr) => mmr != null && mmr >= ELITE_MMR);
+}
+
+function hasStoredComebackSignal(game: Pick<StoredOutlierGame, "reasons">) {
+  return game.reasons.some((reason) => {
+    const haystack = `${reason.type} ${reason.label}`.toLowerCase();
+    return COMEBACK_REASON_PATTERNS.some((pattern) => haystack.includes(pattern));
+  });
+}
+
+function bestStoredBy(games: StoredOutlierGame[], score: (game: StoredOutlierGame) => number) {
+  return (
+    [...games].sort((a, b) => score(b) - score(a) || b.score - a.score || b.selectedAt.getTime() - a.selectedAt.getTime())[0] ?? null
+  );
+}
+
+function serializeStoredOutlierGame(game: StoredOutlierGame) {
+  return {
+    ...game,
+    startedAt: Timestamp.fromDate(game.startedAt),
+    updatedAt: game.updatedAt ? Timestamp.fromDate(game.updatedAt) : null,
+    selectedAt: Timestamp.fromDate(game.selectedAt),
+    expiresAt: Timestamp.fromDate(game.expiresAt),
+  };
+}
+
+function selectHomepageHighlights(games: StoredOutlierGame[]) {
+  const selectedIds = new Set<string>();
+  const highlights: Array<{ label: string; game: ReturnType<typeof serializeStoredOutlierGame> }> = [];
+
+  function add(label: string, game: StoredOutlierGame | null) {
+    if (!game || selectedIds.has(game.id)) return;
+    selectedIds.add(game.id);
+    highlights.push({ label, game: serializeStoredOutlierGame(game) });
+  }
+
+  add("Highest Score", bestStoredBy(games.filter((game) => game.score >= 100), (game) => game.score));
+  add("Best Comeback", bestStoredBy(games.filter((game) => !selectedIds.has(game.id) && hasStoredComebackSignal(game)), (game) => game.score));
+  add("Best Pro Match", bestStoredBy(games.filter((game) => !selectedIds.has(game.id) && isStoredEliteGame(game)), (game) => game.score));
+  add("Biggest Upset", bestStoredBy(games.filter((game) => !selectedIds.has(game.id) && storedUnderdogMmrDiff(game) >= 150), storedUnderdogMmrDiff));
+
+  return highlights;
 }
 
 async function findUnsavedCandidates<T extends { game: AoeGame }>(candidates: T[], count: number) {
@@ -1114,6 +1195,7 @@ async function runScan(forcePlayers = false, options: { allowDeepFallback?: bool
         { merge: true },
       ),
     ]);
+    const homepageHighlightCount = await updateHomepageHighlights();
 
     return {
       ok: true,
@@ -1144,6 +1226,7 @@ async function runScan(forcePlayers = false, options: { allowDeepFallback?: bool
       nextPlayerOffset: fetchDiagnostics.nextPlayerOffset,
       playerBatchesChecked: fetchDiagnostics.playerBatchesChecked,
       ignoredGameTtlHours: IGNORED_GAME_TTL_HOURS,
+      homepageHighlightCount,
     };
   } catch (error) {
     const message = error instanceof Error ? error.message : "Unknown scan error";
@@ -1195,6 +1278,43 @@ function storedGameFromData(id: string, data: AnyRecord): AoeGame {
     civilizations: arrayValue(data.civilizations).map((civ) => stringValue(civ)).filter((civ): civ is string => Boolean(civ)),
     players,
   };
+}
+
+function storedOutlierFromData(id: string, data: AnyRecord): StoredOutlierGame {
+  const game = storedGameFromData(id, data);
+  return {
+    ...game,
+    id,
+    selectedAt: storedDate(data.selectedAt),
+    expiresAt: storedDate(data.expiresAt),
+    score: numberValue(data.score) ?? 0,
+    summaryAvailable: typeof data.summaryAvailable === "boolean" ? data.summaryAvailable : null,
+    summaryUrl: stringValue(data.summaryUrl) ?? null,
+    reasons: arrayValue(data.reasons).map(record).map((reason) => ({
+      type: stringValue(reason.type) ?? "unknown",
+      label: stringValue(reason.label) ?? "Unknown reason",
+      weight: numberValue(reason.weight) ?? 0,
+    })),
+    tags: arrayValue(data.tags).map((tag) => stringValue(tag)).filter((tag): tag is string => Boolean(tag)),
+    matchupStats: (data.matchupStats as StoredOutlierGame["matchupStats"]) ?? null,
+    isFreshPick: Boolean(data.isFreshPick),
+  };
+}
+
+async function updateHomepageHighlights() {
+  const snapshot = await OUTLIER_COLLECTION.where("expiresAt", ">=", Timestamp.fromDate(new Date())).limit(250).get();
+  const games = snapshot.docs
+    .map((doc) => storedOutlierFromData(doc.id, record(doc.data())))
+    .sort((a, b) => b.selectedAt.getTime() - a.selectedAt.getTime());
+  const highlights = selectHomepageHighlights(games);
+  await HOMEPAGE_HIGHLIGHTS_DOC.set(
+    {
+      updatedAt: FieldValue.serverTimestamp(),
+      highlights,
+    },
+    { merge: true },
+  );
+  return highlights.length;
 }
 
 async function rescoreSavedOutliers(dryRun = true) {
@@ -1262,6 +1382,7 @@ async function rescoreSavedOutliers(dryRun = true) {
   }
 
   if (!dryRun && writes > 0) await batch.commit();
+  const homepageHighlightCount = dryRun ? null : await updateHomepageHighlights();
 
   return {
     ok: true,
@@ -1270,6 +1391,7 @@ async function rescoreSavedOutliers(dryRun = true) {
     keptCount: kept.length,
     removedCount: removed.length,
     skippedCount: skipped.length,
+    homepageHighlightCount,
     kept,
     removed,
     skipped,

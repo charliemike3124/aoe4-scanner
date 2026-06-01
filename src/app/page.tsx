@@ -21,7 +21,7 @@ export default function Home() {
           </div>
         </header>
 
-        <OutlierFeed mode="latest" pageSize={15} />
+        <OutlierFeed mode="latest" pageSize={15} showHighlights />
 
         <div className="flex justify-center">
           <Link href="/games" className={buttonClassName()}>
