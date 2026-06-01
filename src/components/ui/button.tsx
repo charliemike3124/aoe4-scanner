@@ -1,6 +1,4 @@
-import * as React from "react";
 import { cva, type VariantProps } from "class-variance-authority";
-import { cn } from "@/lib/utils";
 
 const buttonVariants = cva(
   "inline-flex h-10 items-center justify-center gap-2 whitespace-nowrap rounded-md px-4 text-sm font-semibold transition focus-visible:outline focus-visible:outline-2 focus-visible:outline-offset-2 disabled:pointer-events-none disabled:opacity-50",
@@ -17,14 +15,6 @@ const buttonVariants = cva(
     },
   },
 );
-
-export function Button({
-  className,
-  variant,
-  ...props
-}: React.ButtonHTMLAttributes<HTMLButtonElement> & VariantProps<typeof buttonVariants>) {
-  return <button className={cn(buttonVariants({ variant }), className)} {...props} />;
-}
 
 export function buttonClassName(variant?: VariantProps<typeof buttonVariants>["variant"]) {
   return buttonVariants({ variant });
