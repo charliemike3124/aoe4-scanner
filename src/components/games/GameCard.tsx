@@ -2,7 +2,7 @@
 
 import { useEffect, useState } from "react";
 import Link from "next/link";
-import { Bookmark, ExternalLink, LinkIcon, Twitch, Youtube } from "lucide-react";
+import { Bookmark, ChevronDown, ChevronUp, ExternalLink, LinkIcon, Twitch, Youtube } from "lucide-react";
 import { CivilizationPill } from "@/components/games/CivilizationPill";
 import { OutlierBadge } from "@/components/games/OutlierBadge";
 import { ScorePill } from "@/components/games/ScorePill";
@@ -54,6 +54,14 @@ function socialLabel(key: string) {
   return key.replaceAll("_", " ");
 }
 
+function playerPageUrl(player?: OutlierGame["players"][number]) {
+  return player?.profileId ? `https://aoe4world.com/players/${player.profileId}` : "https://aoe4world.com";
+}
+
+function playerGamesUrl(player?: OutlierGame["players"][number]) {
+  return player?.profileId ? `https://aoe4world.com/players/${player.profileId}/games` : "https://aoe4world.com/games";
+}
+
 export function GameCard({
   outlier,
   compact = false,
@@ -68,6 +76,10 @@ export function GameCard({
   const players = outlier.players;
   const gap = playerGap(players);
   const [bookmarked, setBookmarked] = useState(false);
+  const [expanded, setExpanded] = useState(false);
+  const summaryUnavailable = outlier.summaryAvailable === false;
+  const aoe4worldHref = summaryUnavailable ? playerPageUrl(players[0]) : outlier.aoe4worldUrl;
+  const visibleReasons = expanded ? outlier.reasons : outlier.reasons.slice(0, 3);
 
   useEffect(() => {
     setBookmarked(readBookmarks().has(outlier.id));
@@ -95,9 +107,16 @@ export function GameCard({
                     New
                   </span>
                 ) : null}
-                <Link href={outlier.aoe4worldUrl} target="_blank" className="text-lg font-bold text-white hover:text-sky-200">
-                  {players.map((player) => playerTitle(player)).join(" vs ")}
-                </Link>
+                <h2 className="flex flex-wrap items-center gap-x-1.5 text-lg font-bold text-white">
+                  {players.map((player, index) => (
+                    <span key={`${outlier.id}-title-${player.profileId}`} className="inline-flex items-center gap-x-1.5">
+                      {index > 0 ? <span className="text-slate-500">vs</span> : null}
+                      <Link href={playerGamesUrl(player)} target="_blank" className="hover:text-sky-200">
+                        {playerTitle(player)}
+                      </Link>
+                    </span>
+                  ))}
+                </h2>
               </div>
             </div>
             <div className="flex items-center gap-2">
@@ -109,14 +128,9 @@ export function GameCard({
               >
                 <Bookmark className={cn("h-4 w-4", bookmarked && "fill-current")} />
               </button>
-              <a
-                className={cn(buttonClassName("ghost"), "h-8 px-2.5")}
-                href={outlier.aoe4worldUrl}
-                target="_blank"
-                rel="noreferrer"
-              >
+              <a className={cn(buttonClassName("ghost"), "h-8 px-2.5")} href={aoe4worldHref} target="_blank" rel="noreferrer">
                 <ExternalLink className="h-4 w-4" />
-                Game Summary
+                {summaryUnavailable ? "Player Page" : "Game Summary"}
               </a>
             </div>
           </div>
@@ -157,9 +171,7 @@ export function GameCard({
                     <span
                       className={cn(
                         "shrink-0 rounded-sm px-1.5 py-0.5 text-[10px] font-bold uppercase tracking-wide",
-                        participant.result?.toLowerCase() === "win"
-                          ? "bg-emerald-400/15 text-emerald-200"
-                          : "bg-rose-400/15 text-rose-200",
+                        participant.result?.toLowerCase() === "win" ? "bg-emerald-400/15 text-emerald-200" : "bg-rose-400/15 text-rose-200",
                       )}
                     >
                       {participant.result?.toLowerCase() === "win" ? "Winner" : "Lost"}
@@ -197,11 +209,32 @@ export function GameCard({
                 ))}
               </div>
               {!spoilerLight ? (
-                <ul className="space-y-1 text-sm text-slate-300">
-                  {outlier.reasons.slice(0, 3).map((reason) => (
-                    <li key={`${reason.type}-${reason.label}`}>{reason.label}</li>
-                  ))}
-                </ul>
+                <div className="space-y-2">
+                  <ul className="space-y-1 text-sm text-slate-300">
+                    {visibleReasons.map((reason) => (
+                      <li key={`${reason.type}-${reason.label}`}>{reason.label}</li>
+                    ))}
+                  </ul>
+                  {outlier.reasons.length > 3 ? (
+                    <button
+                      type="button"
+                      onClick={() => setExpanded((next) => !next)}
+                      className="inline-flex items-center gap-1 rounded-md border border-white/10 bg-white/[0.03] px-2.5 py-1 text-xs font-semibold text-sky-100 transition hover:border-sky-300/40 hover:bg-sky-300/10"
+                    >
+                      {expanded ? (
+                        <>
+                          Show less
+                          <ChevronUp className="h-3.5 w-3.5" />
+                        </>
+                      ) : (
+                        <>
+                          Show {outlier.reasons.length - 3} more
+                          <ChevronDown className="h-3.5 w-3.5" />
+                        </>
+                      )}
+                    </button>
+                  ) : null}
+                </div>
               ) : (
                 <p className="text-sm text-slate-400">Spoiler-light mode is hiding winner-specific notes.</p>
               )}

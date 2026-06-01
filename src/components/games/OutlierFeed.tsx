@@ -83,6 +83,10 @@ function matchesClientFilters(game: OutlierGame, filters: FeedFilters, bookmarks
   return true;
 }
 
+function newestPickedFirst(a: OutlierGame, b: OutlierGame) {
+  return b.selectedAt.getTime() - a.selectedAt.getTime() || b.startedAt.getTime() - a.startedAt.getTime();
+}
+
 function cacheKey(mode: FeedMode, filters: FeedFilters, pageSize?: number) {
   return `${CACHE_PREFIX}${JSON.stringify({ mode, filters: { ...filters, bookmarkedOnly: false }, pageSize })}`;
 }
@@ -149,11 +153,7 @@ export function OutlierFeed({
           }
         }
 
-        const orderField = filters.latest48h
-          ? 'startedAt'
-          : mode === 'latest'
-            ? 'selectedAt'
-            : 'startedAt';
+        const orderField = filters.latest48h ? 'startedAt' : 'selectedAt';
         const clauses = [
           orderBy(orderField, 'desc'),
           limit(pageSize ?? (mode === 'latest' ? 10 : 120)),
@@ -175,7 +175,7 @@ export function OutlierFeed({
           getDoc(doc(db, 'meta', 'publicStatus')),
         ]);
         if (cancelled) return;
-        const nextGames = snapshot.docs.map((gameDoc) => outlierFromSnapshot(gameDoc));
+        const nextGames = snapshot.docs.map((gameDoc) => outlierFromSnapshot(gameDoc)).sort(newestPickedFirst);
         const nextStatus = statusFromData(statusSnapshot.data());
         localStorage.setItem(
           key,
@@ -215,7 +215,7 @@ export function OutlierFeed({
   ]);
 
   const visibleGames = useMemo(
-    () => games.filter((game) => matchesClientFilters(game, filters, bookmarks)),
+    () => games.filter((game) => matchesClientFilters(game, filters, bookmarks)).sort(newestPickedFirst),
     [bookmarks, filters, games],
   );
 

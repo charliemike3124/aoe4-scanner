@@ -1,7 +1,7 @@
 "use client";
 
 import { useEffect, useMemo, useState } from "react";
-import { collection, getDocs, limit, orderBy, query, type DocumentData, type Timestamp } from "firebase/firestore";
+import { collection, doc, getDoc, getDocs, limit, orderBy, query, type DocumentData, type Timestamp } from "firebase/firestore";
 import { ExternalLink, RefreshCw } from "lucide-react";
 import { EmptyState } from "@/components/games/EmptyState";
 import { buttonClassName } from "@/components/ui/button";
@@ -39,6 +39,7 @@ type ScanRun = {
   lookbackHours: number | null;
   expandedLookback: boolean;
   selectedGameIds: string[];
+  selectedGameUrls: Record<string, string>;
   message: string | null;
   error: string | null;
 };
@@ -51,6 +52,13 @@ function toDate(value: Timestamp | Date | null | undefined) {
 
 function numberOrNull(value: unknown) {
   return typeof value === "number" && Number.isFinite(value) ? value : null;
+}
+
+function stringRecord(value: unknown) {
+  if (!value || typeof value !== "object") return {};
+  return Object.fromEntries(
+    Object.entries(value as Record<string, unknown>).filter((entry): entry is [string, string] => typeof entry[1] === "string"),
+  );
 }
 
 function readScanRun(id: string, data: DocumentData): ScanRun {
@@ -89,6 +97,7 @@ function readScanRun(id: string, data: DocumentData): ScanRun {
       : typeof data.selectedGameId === "string"
         ? [data.selectedGameId]
         : [],
+    selectedGameUrls: stringRecord(data.selectedGameUrls),
     message: typeof data.message === "string" ? data.message : null,
     error: typeof data.error === "string" ? data.error : null,
   };
@@ -125,6 +134,7 @@ function Stat({ label, value }: { label: string; value: string | number | null }
 
 export function ScanRunsView() {
   const [runs, setRuns] = useState<ScanRun[]>([]);
+  const [resolvedGameUrls, setResolvedGameUrls] = useState<Record<string, string>>({});
   const [loading, setLoading] = useState(true);
   const [error, setError] = useState<string | null>(null);
   const [refreshKey, setRefreshKey] = useState(0);
@@ -139,7 +149,28 @@ export function ScanRunsView() {
         const runsQuery = query(collection(db, "scanRuns"), orderBy("startedAt", "desc"), limit(50));
         const snapshot = await getDocs(runsQuery);
         if (cancelled) return;
-        setRuns(snapshot.docs.map((doc) => readScanRun(doc.id, doc.data())));
+        const nextRuns = snapshot.docs.map((doc) => readScanRun(doc.id, doc.data()));
+        setRuns(nextRuns);
+
+        const missingGameIds = Array.from(
+          new Set(
+            nextRuns
+              .flatMap((run) => run.selectedGameIds)
+              .filter((gameId) => !nextRuns.some((run) => run.selectedGameUrls[gameId])),
+          ),
+        );
+        if (missingGameIds.length) {
+          const urlEntries = await Promise.all(
+            missingGameIds.map(async (gameId) => {
+              const gameSnapshot = await getDoc(doc(db, "outlierGames", gameId));
+              const url = gameSnapshot.exists() ? gameSnapshot.data().aoe4worldUrl : null;
+              return typeof url === "string" ? ([gameId, url] as const) : null;
+            }),
+          );
+          if (!cancelled) setResolvedGameUrls(Object.fromEntries(urlEntries.filter((entry): entry is [string, string] => Boolean(entry))));
+        } else {
+          setResolvedGameUrls({});
+        }
       } catch (caught) {
         if (!cancelled) setError(caught instanceof Error ? caught.message : "Could not load scan logs.");
       } finally {
@@ -226,18 +257,28 @@ export function ScanRunsView() {
 
               {run.selectedGameIds.length ? (
                 <div className="mt-4 flex flex-wrap gap-2">
-                  {run.selectedGameIds.map((gameId) => (
-                    <a
-                      key={gameId}
-                      href={`https://aoe4world.com/games/${gameId}`}
-                      target="_blank"
-                      rel="noreferrer"
-                      className="inline-flex items-center gap-1 rounded-md border border-sky-300/20 bg-sky-300/10 px-2.5 py-1 font-mono text-xs text-sky-100 hover:border-sky-300/50"
-                    >
-                      {gameId}
-                      <ExternalLink className="h-3 w-3" />
-                    </a>
-                  ))}
+                  {run.selectedGameIds.map((gameId) => {
+                    const gameUrl = run.selectedGameUrls[gameId] ?? resolvedGameUrls[gameId];
+                    return gameUrl ? (
+                      <a
+                        key={gameId}
+                        href={gameUrl}
+                        target="_blank"
+                        rel="noreferrer"
+                        className="inline-flex items-center gap-1 rounded-md border border-sky-300/20 bg-sky-300/10 px-2.5 py-1 font-mono text-xs text-sky-100 hover:border-sky-300/50"
+                      >
+                        {gameId}
+                        <ExternalLink className="h-3 w-3" />
+                      </a>
+                    ) : (
+                      <span
+                        key={gameId}
+                        className="inline-flex items-center rounded-md border border-white/10 bg-white/[0.03] px-2.5 py-1 font-mono text-xs text-slate-400"
+                      >
+                        {gameId}
+                      </span>
+                    );
+                  })}
                 </div>
               ) : null}
             </article>

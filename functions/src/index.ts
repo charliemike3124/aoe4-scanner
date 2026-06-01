@@ -85,7 +85,7 @@ type Reason = {
   weight: number;
 };
 
-type ScoredCandidate = { game: AoeGame } & ReturnType<typeof scoreGame>;
+type ScoredCandidate = { game: AoeGame; summaryAvailable?: boolean } & ReturnType<typeof scoreGame>;
 
 type FetchDiagnostics = {
   apiRequestsMade: number;
@@ -710,9 +710,10 @@ function addContextualMatchupReason(candidate: ScoredCandidate, matchupStats: Ma
 }
 
 async function enrichFinalistsWithSummaries(candidates: ScoredCandidate[], matchupStats: Map<string, MatchupStat>) {
-  const finalists = candidates;
+  const finalists: ScoredCandidate[] = candidates;
   for (const candidate of finalists) {
     const summary = await fetchGameSummary(candidate.game);
+    candidate.summaryAvailable = Boolean(summary);
     if (summary) {
       analyzeSummary(candidate, summary);
       const payload = record(summary);
@@ -1029,6 +1030,7 @@ async function runScan(forcePlayers = false, options: { allowDeepFallback?: bool
         selectedAt: FieldValue.serverTimestamp(),
         expiresAt: Timestamp.fromDate(expiresAt),
         score: candidate.score,
+        summaryAvailable: candidate.summaryAvailable ?? null,
         reasons: candidate.reasons,
         tags: candidate.tags,
         matchupStats: candidate.matchupStats,
@@ -1037,6 +1039,9 @@ async function runScan(forcePlayers = false, options: { allowDeepFallback?: bool
 
     const now = FieldValue.serverTimestamp();
     const selectedGameIds = selection.selected.map((candidate) => candidate.game.aoe4worldGameId);
+    const selectedGameUrls = Object.fromEntries(
+      selection.selected.map((candidate) => [candidate.game.aoe4worldGameId, candidate.game.aoe4worldUrl]),
+    );
     await markFreshPicks(selectedGameIds);
     const message = selection.selected.length
       ? `Stored ${selection.selected.length} games: ${selectedGameIds.join(", ")}.`
@@ -1067,6 +1072,7 @@ async function runScan(forcePlayers = false, options: { allowDeepFallback?: bool
           primaryGamesChecked: primaryGames.length,
           selectedGameId: selectedGameIds[0] ?? null,
           selectedGameIds,
+          selectedGameUrls,
           storedCount: selection.selected.length,
           summaryFinalistsChecked: selection.finalists.length,
           excludedGames: excludedGameIds.size,
@@ -1101,6 +1107,7 @@ async function runScan(forcePlayers = false, options: { allowDeepFallback?: bool
       primaryGamesChecked: primaryGames.length,
       selectedGameId: selectedGameIds[0] ?? null,
       selectedGameIds,
+      selectedGameUrls,
       storedCount: selection.selected.length,
       summaryFinalistsChecked: selection.finalists.length,
       excludedGames: excludedGameIds.size,

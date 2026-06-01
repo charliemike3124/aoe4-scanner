@@ -1,4 +1,4 @@
-export type PlayerResult = "win" | "loss" | string;
+export type PlayerResult = 'win' | 'loss' | string;
 
 export type GameParticipant = {
   profileId: string;
@@ -35,6 +35,7 @@ export type OutlierGame = {
   averageMmr: number | null;
   score: number;
   isFreshPick?: boolean;
+  summaryAvailable?: boolean | null;
   reasons: OutlierReason[];
   tags: string[];
   civilizations: string[];

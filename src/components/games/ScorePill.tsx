@@ -3,7 +3,7 @@ import { Tooltip } from "@/components/ui/tooltip";
 
 export function ScorePill({ score }: { score: number }) {
   return (
-    <div className="relative flex h-16 w-16 shrink-0 flex-col items-center justify-center rounded-md border border-sky-300/30 bg-sky-400/12 text-sky-100">
+    <div className="relative flex h-16 w-[4.75rem] shrink-0 flex-col items-center justify-center rounded-md border border-sky-300/30 bg-sky-400/12 px-2 text-sky-100">
       <div className="absolute right-1 top-1">
         <Tooltip
           side="bottom"
@@ -15,7 +15,7 @@ export function ScorePill({ score }: { score: number }) {
           </span>
         </Tooltip>
       </div>
-      <span className="text-xl font-bold tabular-nums">{Math.round(score)}</span>
+      <span className="mt-1 text-xl font-bold tabular-nums leading-none">{Math.round(score)}</span>
       <span className="text-[10px] uppercase tracking-[0.18em] text-sky-200/70">score</span>
     </div>
   );
