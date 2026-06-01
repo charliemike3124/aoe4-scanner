@@ -27,6 +27,7 @@ const MAX_GAMES_PER_SCAN = 100;
 const GAMES_TO_SAVE_PER_SCAN = 5;
 const SUMMARY_FINALIST_COUNT = 5;
 const ELITE_SUMMARY_PROBE_COUNT = 3;
+const FRESH_PICK_SCAN_WINDOW = 3;
 const MIN_GAME_DURATION_SECONDS = 8 * 60;
 const MIN_SCORE = 32;
 const ELITE_MMR = 2000;
@@ -449,12 +450,25 @@ async function rememberRejectedGames(games: AoeGame[], scored: ScoredCandidate[]
 }
 
 async function markFreshPicks(selectedIds: string[]) {
-  if (!selectedIds.length) return;
-
+  const recentFreshIds = new Set(selectedIds);
+  const recentRuns = await db
+    .collection("scanRuns")
+    .orderBy("startedAt", "desc")
+    .limit(Math.max(0, FRESH_PICK_SCAN_WINDOW - 1))
+    .get();
+  recentRuns.docs.forEach((doc) => {
+    const runSelectedIds = doc.data().selectedGameIds;
+    if (Array.isArray(runSelectedIds)) {
+      runSelectedIds.forEach((gameId) => {
+        if (typeof gameId === "string") recentFreshIds.add(gameId);
+      });
+    }
+  });
   const previousFresh = await OUTLIER_COLLECTION.where("isFreshPick", "==", true).limit(50).get();
+  if (previousFresh.empty && !recentFreshIds.size) return;
   const batch = db.batch();
   previousFresh.docs.forEach((doc) => batch.set(doc.ref, { isFreshPick: false }, { merge: true }));
-  selectedIds.forEach((id) => batch.set(OUTLIER_COLLECTION.doc(id), { isFreshPick: true }, { merge: true }));
+  recentFreshIds.forEach((id) => batch.set(OUTLIER_COLLECTION.doc(id), { isFreshPick: true }, { merge: true }));
   await batch.commit();
 }
 

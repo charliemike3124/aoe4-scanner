@@ -9,8 +9,6 @@ import {
   limit,
   orderBy,
   query,
-  Timestamp,
-  where,
 } from 'firebase/firestore';
 import { GameCard } from '@/components/games/GameCard';
 import { EmptyState } from '@/components/games/EmptyState';
@@ -68,17 +66,22 @@ function matchesClientFilters(game: OutlierGame, filters: FeedFilters, bookmarks
     const needle = filters.q.toLowerCase();
     if (!game.players.some((player) => player.name.toLowerCase().includes(needle))) return false;
   }
+  if (filters.civilization && !game.civilizations.includes(filters.civilization)) return false;
   if (filters.map && !game.map?.toLowerCase().includes(filters.map.toLowerCase())) return false;
+  if (filters.latest48h && game.startedAt.getTime() < Date.now() - 48 * 60 * 60 * 1000) return false;
   const playerRatings = game.players
     .map((player) => player.rating)
     .filter((rating): rating is number => rating != null);
-  const gameElo =
-    game.averageRating ??
-    (playerRatings.length
-      ? Math.round(playerRatings.reduce((sum, rating) => sum + rating, 0) / playerRatings.length)
-      : null);
-  if (filters.minElo != null && gameElo != null && gameElo < filters.minElo) return false;
-  if (filters.maxElo != null && gameElo != null && gameElo > filters.maxElo) return false;
+  if (
+    (filters.minElo != null || filters.maxElo != null) &&
+    !playerRatings.some((rating) => {
+      if (filters.minElo != null && rating < filters.minElo) return false;
+      if (filters.maxElo != null && rating > filters.maxElo) return false;
+      return true;
+    })
+  ) {
+    return false;
+  }
   if (filters.bookmarkedOnly && !bookmarks.has(game.id)) return false;
   return true;
 }
@@ -87,8 +90,8 @@ function newestPickedFirst(a: OutlierGame, b: OutlierGame) {
   return b.selectedAt.getTime() - a.selectedAt.getTime() || b.startedAt.getTime() - a.startedAt.getTime();
 }
 
-function cacheKey(mode: FeedMode, filters: FeedFilters, pageSize?: number) {
-  return `${CACHE_PREFIX}${JSON.stringify({ mode, filters: { ...filters, bookmarkedOnly: false }, pageSize })}`;
+function cacheKey(mode: FeedMode, pageSize?: number) {
+  return `${CACHE_PREFIX}${JSON.stringify({ mode, pageSize })}`;
 }
 
 export function OutlierFeed({
@@ -123,7 +126,7 @@ export function OutlierFeed({
 
   useEffect(() => {
     let cancelled = false;
-    const key = cacheKey(mode, filters, pageSize);
+    const key = cacheKey(mode, pageSize);
 
     async function load() {
       setLoading(true);
@@ -153,23 +156,11 @@ export function OutlierFeed({
           }
         }
 
-        const orderField = filters.latest48h ? 'startedAt' : 'selectedAt';
         const clauses = [
-          orderBy(orderField, 'desc'),
-          limit(pageSize ?? (mode === 'latest' ? 10 : 120)),
+          orderBy('selectedAt', 'desc'),
+          limit(pageSize ?? (mode === 'latest' ? 10 : 250)),
         ];
-        const filterClauses = [];
-        if (filters.civilization)
-          filterClauses.push(where('civilizations', 'array-contains', filters.civilization));
-        if (filters.latest48h)
-          filterClauses.push(
-            where(
-              'startedAt',
-              '>=',
-              Timestamp.fromDate(new Date(Date.now() - 48 * 60 * 60 * 1000)),
-            ),
-          );
-        const gamesQuery = query(collection(db, 'outlierGames'), ...filterClauses, ...clauses);
+        const gamesQuery = query(collection(db, 'outlierGames'), ...clauses);
         const [snapshot, statusSnapshot] = await Promise.all([
           getDocs(gamesQuery),
           getDoc(doc(db, 'meta', 'publicStatus')),
@@ -192,7 +183,7 @@ export function OutlierFeed({
         setStatus(nextStatus);
       } catch (caught) {
         if (!cancelled)
-          setError(caught instanceof Error ? caught.message : 'Could not load outlier games.');
+          setError('The archive could not load right now. Try refreshing the page in a moment.');
       } finally {
         if (!cancelled) setLoading(false);
       }
@@ -203,15 +194,8 @@ export function OutlierFeed({
       cancelled = true;
     };
   }, [
-    filters.civilization,
-    filters.latest48h,
-    filters.map,
-    filters.maxElo,
-    filters.minElo,
-    filters.q,
     mode,
     pageSize,
-    filters.bookmarkedOnly,
   ]);
 
   const visibleGames = useMemo(

@@ -7,6 +7,7 @@ import { CivilizationPill } from "@/components/games/CivilizationPill";
 import { OutlierBadge } from "@/components/games/OutlierBadge";
 import { ScorePill } from "@/components/games/ScorePill";
 import { buttonClassName } from "@/components/ui/button";
+import { Tooltip } from "@/components/ui/tooltip";
 import { formatDuration } from "@/lib/format";
 import type { OutlierGame } from "@/lib/types";
 import { cn } from "@/lib/utils";
@@ -111,7 +112,7 @@ export function GameCard({
                   {players.map((player, index) => (
                     <span key={`${outlier.id}-title-${player.profileId}`} className="inline-flex items-center gap-x-1.5">
                       {index > 0 ? <span className="text-slate-500">vs</span> : null}
-                      <Link href={playerGamesUrl(player)} target="_blank" className="hover:text-sky-200">
+                      <Link href={index === 0 ? playerGamesUrl(player) : playerPageUrl(player)} target="_blank" className="hover:text-sky-200">
                         {playerTitle(player)}
                       </Link>
                     </span>
@@ -128,10 +129,20 @@ export function GameCard({
               >
                 <Bookmark className={cn("h-4 w-4", bookmarked && "fill-current")} />
               </button>
-              <a className={cn(buttonClassName("ghost"), "h-8 px-2.5")} href={aoe4worldHref} target="_blank" rel="noreferrer">
-                <ExternalLink className="h-4 w-4" />
-                {summaryUnavailable ? "Player Page" : "Game Summary"}
-              </a>
+              <Tooltip
+                side="bottom"
+                align="end"
+                label={
+                  summaryUnavailable
+                    ? "AOE4World does not have a public summary for this match, so this opens the player page instead."
+                    : "Opens the AOE4World game summary. Sometimes summaries are unavailable on AOE4World."
+                }
+              >
+                <a className={cn(buttonClassName("ghost"), "h-8 px-2.5")} href={aoe4worldHref} target="_blank" rel="noreferrer">
+                  <ExternalLink className="h-4 w-4" />
+                  {summaryUnavailable ? "Player Page" : "Game Summary"}
+                </a>
+              </Tooltip>
             </div>
           </div>
 
