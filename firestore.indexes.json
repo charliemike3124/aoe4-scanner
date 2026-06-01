@@ -1,0 +1,28 @@
+{
+  "indexes": [
+    {
+      "collectionGroup": "outlierGames",
+      "queryScope": "COLLECTION",
+      "fields": [
+        { "fieldPath": "selectedAt", "order": "DESCENDING" },
+        { "fieldPath": "score", "order": "DESCENDING" }
+      ]
+    },
+    {
+      "collectionGroup": "outlierGames",
+      "queryScope": "COLLECTION",
+      "fields": [
+        { "fieldPath": "startedAt", "order": "DESCENDING" },
+        { "fieldPath": "score", "order": "DESCENDING" }
+      ]
+    },
+    {
+      "collectionGroup": "outlierGames",
+      "queryScope": "COLLECTION",
+      "fields": [
+        { "fieldPath": "civilizations", "arrayConfig": "CONTAINS" },
+        { "fieldPath": "startedAt", "order": "DESCENDING" }
+      ]
+    }
+  ]
+}
