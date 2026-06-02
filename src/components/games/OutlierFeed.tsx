@@ -25,8 +25,12 @@ type FeedFilters = {
   map?: string;
   minElo?: number;
   maxElo?: number;
+  minScore?: number;
+  maxScore?: number;
+  sort?: 'newest' | 'score';
   latest48h?: boolean;
   bookmarkedOnly?: boolean;
+  upsetsOnly?: boolean;
 };
 
 const CACHE_TTL_MS = 15 * 60 * 1000;
@@ -83,6 +87,11 @@ function matchesClientFilters(game: OutlierGame, filters: FeedFilters, bookmarks
   if (filters.civilization && !game.civilizations.includes(filters.civilization)) return false;
   if (filters.map && !game.map?.toLowerCase().includes(filters.map.toLowerCase())) return false;
   if (filters.latest48h && game.startedAt.getTime() < Date.now() - 48 * 60 * 60 * 1000) return false;
+  if (filters.minScore != null && game.score < filters.minScore) return false;
+  if (filters.maxScore != null && game.score > filters.maxScore) return false;
+  if (filters.upsetsOnly && !game.reasons.some((reason) => reason.type.toLowerCase().includes('upset') || reason.label.toLowerCase().includes('underdog'))) {
+    return false;
+  }
   const playerRatings = game.players
     .map((player) => player.rating)
     .filter((rating): rating is number => rating != null);
@@ -102,6 +111,10 @@ function matchesClientFilters(game: OutlierGame, filters: FeedFilters, bookmarks
 
 function newestPickedFirst(a: OutlierGame, b: OutlierGame) {
   return b.selectedAt.getTime() - a.selectedAt.getTime() || b.startedAt.getTime() - a.startedAt.getTime();
+}
+
+function scoreFirst(a: OutlierGame, b: OutlierGame) {
+  return b.score - a.score || newestPickedFirst(a, b);
 }
 
 type Highlight = {
@@ -341,7 +354,7 @@ export function OutlierFeed({
   ]);
 
   const visibleGames = useMemo(
-    () => games.filter((game) => matchesClientFilters(game, filters, bookmarks)).sort(newestPickedFirst),
+    () => games.filter((game) => matchesClientFilters(game, filters, bookmarks)).sort(filters.sort === 'score' ? scoreFirst : newestPickedFirst),
     [bookmarks, filters, games],
   );
   const filterKey = JSON.stringify(filters);

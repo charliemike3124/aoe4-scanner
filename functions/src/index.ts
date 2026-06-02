@@ -15,6 +15,7 @@ const SCAN_LOCK_DOC = db.collection("meta").doc("scanLock");
 const PUBLIC_STATUS_DOC = db.collection("meta").doc("publicStatus");
 const HOMEPAGE_HIGHLIGHTS_DOC = db.collection("meta").doc("homepageHighlights");
 const ARCHIVE_SNAPSHOT_DOC = db.collection("meta").doc("archiveSnapshot");
+const MAP_POOL_DOC = db.collection("meta").doc("mapPool");
 const OUTLIER_COLLECTION = db.collection("outlierGames");
 const IGNORED_COLLECTION = db.collection("ignoredGames");
 const MIN_RATING = 1700;
@@ -114,6 +115,12 @@ type FetchDiagnostics = {
   startPlayerOffset: number;
   nextPlayerOffset: number;
   playerBatchesChecked: number;
+};
+
+type MapPoolMap = {
+  mapId: number;
+  map: string;
+  gamesCount: number | null;
 };
 
 const SCALING_CIVS = new Set(["abbasid_dynasty", "chinese", "byzantines", "zhu_xis_legacy", "jin_dynasty"]);
@@ -286,11 +293,12 @@ function eliteBaselineWeight(game: AoeGame) {
   return 0;
 }
 
-function scoreGame(game: AoeGame, civStats: Map<string, CivStat>) {
+function scoreGame(game: AoeGame, civStats: Map<string, CivStat>, eliteCivStats = civStats) {
   const reasons: Reason[] = [];
   const tags = new Set<string>();
   const winner = game.players.find((player) => player.result === "win");
   const loser = game.players.find((player) => player.result === "loss");
+  const eliteGame = isEliteGame(game);
 
   if (isMirrorMatch(game)) {
     return { score: 0, reasons, tags: [] };
@@ -299,7 +307,7 @@ function scoreGame(game: AoeGame, civStats: Map<string, CivStat>) {
   if (winner && loser) {
     const winnerMmr = winner.mmr;
     const loserMmr = loser.mmr;
-    if (!isEliteGame(game) && winnerMmr != null && loserMmr != null && winnerMmr - loserMmr >= 150) {
+    if (!eliteGame && winnerMmr != null && loserMmr != null && winnerMmr - loserMmr >= 150) {
       return { score: 0, reasons, tags: [] };
     }
   }
@@ -313,8 +321,10 @@ function scoreGame(game: AoeGame, civStats: Map<string, CivStat>) {
   } | null = null;
 
   if (winner && loser) {
-    const winnerStat = winner.civilization ? civStats.get(winner.civilization) : undefined;
-    const loserStat = loser.civilization ? civStats.get(loser.civilization) : undefined;
+    const relevantCivStats = eliteGame ? eliteCivStats : civStats;
+    const statContext = eliteGame ? " at 1700+ Elo" : "";
+    const winnerStat = winner.civilization ? relevantCivStats.get(winner.civilization) : undefined;
+    const loserStat = loser.civilization ? relevantCivStats.get(loser.civilization) : undefined;
     const eliteWeight = eliteBaselineWeight(game);
     matchupStats = {
       winnerCivilization: winner.civilization,
@@ -338,12 +348,12 @@ function scoreGame(game: AoeGame, civStats: Map<string, CivStat>) {
     }
     if (winnerStat) {
       if (winnerStat.winRate < 46) {
-        addReason(reasons, tags, "very_low_winrate_civ_win", `${winner.civilization} has ${winnerStat.winRate.toFixed(1)}% overall win rate`, 24, "Low win-rate civ");
+        addReason(reasons, tags, "very_low_winrate_civ_win", `${winner.civilization} has ${winnerStat.winRate.toFixed(1)}% overall win rate${statContext}`, 24, "Low win-rate civ");
       } else if (winnerStat.winRate < 48) {
-        addReason(reasons, tags, "low_winrate_civ_win", `${winner.civilization} has ${winnerStat.winRate.toFixed(1)}% overall win rate`, 16, "Low win-rate civ");
+        addReason(reasons, tags, "low_winrate_civ_win", `${winner.civilization} has ${winnerStat.winRate.toFixed(1)}% overall win rate${statContext}`, 16, "Low win-rate civ");
       }
       if (eliteWeight && winnerStat.winRate < 48) {
-        addReason(reasons, tags, "elite_low_winrate_civ_bonus", `Elite win with a ${winnerStat.winRate.toFixed(1)}% overall win-rate civilization`, 8, "Elite civ angle");
+        addReason(reasons, tags, "elite_low_winrate_civ_bonus", `Elite win with a ${winnerStat.winRate.toFixed(1)}% overall win-rate civilization at 1700+ Elo`, 8, "Elite civ angle");
       }
     }
   }
@@ -366,17 +376,17 @@ function scoreGame(game: AoeGame, civStats: Map<string, CivStat>) {
   };
 }
 
-function scoreCandidates(games: AoeGame[], civStats: Map<string, CivStat>) {
+function scoreCandidates(games: AoeGame[], civStats: Map<string, CivStat>, eliteCivStats = civStats) {
   return games
-    .map((game) => ({ game, ...scoreGame(game, civStats) }))
+    .map((game) => ({ game, ...scoreGame(game, civStats, eliteCivStats) }))
     .filter((candidate) => candidate.score >= MIN_SCORE)
     .sort((a, b) => b.score - a.score || b.game.startedAt.getTime() - a.game.startedAt.getTime());
 }
 
-function eliteSummaryProbeCandidates(games: AoeGame[], civStats: Map<string, CivStat>, scored: ScoredCandidate[]) {
+function eliteSummaryProbeCandidates(games: AoeGame[], civStats: Map<string, CivStat>, eliteCivStats: Map<string, CivStat>, scored: ScoredCandidate[]) {
   const scoredIds = new Set(scored.map((candidate) => candidate.game.aoe4worldGameId));
   return games
-    .map((game) => ({ game, ...scoreGame(game, civStats) }))
+    .map((game) => ({ game, ...scoreGame(game, civStats, eliteCivStats) }))
     .filter((candidate) => {
       if (scoredIds.has(candidate.game.aoe4worldGameId)) return false;
       if (!isEliteGame(candidate.game)) return false;
@@ -797,12 +807,17 @@ async function fetchGameSummary(game: AoeGame) {
   return null;
 }
 
-async function fetchMapCivStat(mapId: number, civilization: string) {
-  const cacheKey = `${mapId}|${civilization}`;
+function applyRatingFilter(url: URL, ratingFilter?: string) {
+  if (ratingFilter) url.searchParams.set("rating", ratingFilter);
+}
+
+async function fetchMapCivStat(mapId: number, civilization: string, ratingFilter?: string) {
+  const cacheKey = `${mapId}|${civilization}|${ratingFilter ?? "all"}`;
   if (mapCivStatCache.has(cacheKey)) return mapCivStatCache.get(cacheKey) ?? null;
 
   try {
     const url = new URL(`${API_BASE}/stats/rm_solo/maps/${mapId}`);
+    applyRatingFilter(url, ratingFilter);
     const payload = await fetchJson<{ data?: unknown[] }>(url, 1);
     const raw = arrayValue(payload.data).map(record).find((item) => stringValue(item.civilization) === civilization);
     const stat = raw
@@ -837,19 +852,20 @@ function addContextualMatchupReason(candidate: ScoredCandidate, matchupStats: Ma
   const context = mapStat
     ? ` and ${mapStat.winRate.toFixed(1)}% win rate on ${candidate.game.map ?? "this map"}`
     : "";
+  const statContext = isEliteGame(candidate.game) ? " at 1700+ Elo" : "";
   if (matchupStat.winRate < 42) {
-    addSummaryReason(candidate, "very_bad_contextual_matchup_win", `${winner.civilization} has ${matchupStat.winRate.toFixed(1)}% win rate vs ${loser.civilization}${context}`, 30, "Bad matchup");
+    addSummaryReason(candidate, "very_bad_contextual_matchup_win", `${winner.civilization} has ${matchupStat.winRate.toFixed(1)}% win rate vs ${loser.civilization}${context}${statContext}`, 30, "Bad matchup");
   } else if (matchupStat.winRate < 45) {
-    addSummaryReason(candidate, "bad_contextual_matchup_win", `${winner.civilization} has ${matchupStat.winRate.toFixed(1)}% win rate vs ${loser.civilization}${context}`, 22, "Bad matchup");
+    addSummaryReason(candidate, "bad_contextual_matchup_win", `${winner.civilization} has ${matchupStat.winRate.toFixed(1)}% win rate vs ${loser.civilization}${context}${statContext}`, 22, "Bad matchup");
   } else if (matchupStat.winRate < 47) {
-    addSummaryReason(candidate, "contextual_matchup_upset", `${winner.civilization} has ${matchupStat.winRate.toFixed(1)}% win rate vs ${loser.civilization}${context}`, 14, "Matchup upset");
+    addSummaryReason(candidate, "contextual_matchup_upset", `${winner.civilization} has ${matchupStat.winRate.toFixed(1)}% win rate vs ${loser.civilization}${context}${statContext}`, 14, "Matchup upset");
   }
   if (isEliteGame(candidate.game) && matchupStat.winRate < 47) {
     addSummaryReason(candidate, "elite_bad_matchup_bonus", "Elite-level win in a difficult matchup", 8, "Elite matchup");
   }
 }
 
-async function enrichFinalistsWithSummaries(candidates: ScoredCandidate[], matchupStats: Map<string, MatchupStat>) {
+async function enrichFinalistsWithSummaries(candidates: ScoredCandidate[], matchupStats: Map<string, MatchupStat>, eliteMatchupStats = matchupStats) {
   const finalists: ScoredCandidate[] = candidates;
   for (const candidate of finalists) {
     const summaryResult = await fetchGameSummary(candidate.game);
@@ -862,37 +878,39 @@ async function enrichFinalistsWithSummaries(candidates: ScoredCandidate[], match
       const winner = candidate.game.players.find((player) => player.result === "win");
       let mapStat: CivStat | null = null;
       if (mapId != null && winner?.civilization) {
-        mapStat = await fetchMapCivStat(mapId, winner.civilization);
+        const eliteGame = isEliteGame(candidate.game);
+        const statContext = eliteGame ? " at 1700+ Elo" : "";
+        mapStat = await fetchMapCivStat(mapId, winner.civilization, eliteGame ? ">1700" : undefined);
         if (mapStat) {
           if (mapStat.winRate < 45) {
-            addSummaryReason(candidate, "map_disadvantage_win_strong", `${winner.civilization} has ${mapStat.winRate.toFixed(1)}% win rate on ${candidate.game.map ?? "this map"}`, 26, "Map disadvantage");
+            addSummaryReason(candidate, "map_disadvantage_win_strong", `${winner.civilization} has ${mapStat.winRate.toFixed(1)}% win rate on ${candidate.game.map ?? "this map"}${statContext}`, 26, "Map disadvantage");
           } else if (mapStat.winRate < 47) {
-            addSummaryReason(candidate, "map_disadvantage_win", `${winner.civilization} has ${mapStat.winRate.toFixed(1)}% win rate on ${candidate.game.map ?? "this map"}`, 18, "Map disadvantage");
+            addSummaryReason(candidate, "map_disadvantage_win", `${winner.civilization} has ${mapStat.winRate.toFixed(1)}% win rate on ${candidate.game.map ?? "this map"}${statContext}`, 18, "Map disadvantage");
           }
           if (isEliteGame(candidate.game) && mapStat.winRate < 47) {
             addSummaryReason(candidate, "elite_map_disadvantage_bonus", "Elite-level win on a difficult map for the winner's civilization", 8, "Elite map angle");
           }
         }
       }
-      addContextualMatchupReason(candidate, matchupStats, mapStat);
+      addContextualMatchupReason(candidate, isEliteGame(candidate.game) ? eliteMatchupStats : matchupStats, mapStat);
     }
     await sleep(500);
   }
   return finalists.sort((a, b) => b.score - a.score || b.game.startedAt.getTime() - a.game.startedAt.getTime());
 }
 
-async function enrichCandidateWithSummary(candidate: ScoredCandidate, matchupStats: Map<string, MatchupStat>) {
-  const enriched = await enrichFinalistsWithSummaries([candidate], matchupStats);
+async function enrichCandidateWithSummary(candidate: ScoredCandidate, matchupStats: Map<string, MatchupStat>, eliteMatchupStats = matchupStats) {
+  const enriched = await enrichFinalistsWithSummaries([candidate], matchupStats, eliteMatchupStats);
   return enriched[0] ?? candidate;
 }
 
-async function selectOutlierCandidates(games: AoeGame[], civStats: Map<string, CivStat>, matchupStats: Map<string, MatchupStat>) {
-  const baseCandidates = scoreCandidates(games, civStats);
-  const eliteProbes = eliteSummaryProbeCandidates(games, civStats, baseCandidates);
+async function selectOutlierCandidates(games: AoeGame[], civStats: Map<string, CivStat>, eliteCivStats: Map<string, CivStat>, matchupStats: Map<string, MatchupStat>, eliteMatchupStats: Map<string, MatchupStat>) {
+  const baseCandidates = scoreCandidates(games, civStats, eliteCivStats);
+  const eliteProbes = eliteSummaryProbeCandidates(games, civStats, eliteCivStats, baseCandidates);
   const unsavedBase = await findUnsavedCandidates(baseCandidates, SUMMARY_FINALIST_COUNT);
   const unsavedEliteProbes = await findUnsavedCandidates(eliteProbes, ELITE_SUMMARY_PROBE_COUNT);
   const finalists = mergeCandidates([...unsavedBase, ...unsavedEliteProbes]);
-  const enrichedFinalists = await enrichFinalistsWithSummaries(finalists, matchupStats);
+  const enrichedFinalists = await enrichFinalistsWithSummaries(finalists, matchupStats, eliteMatchupStats);
   const qualified = mergeCandidates([...baseCandidates, ...enrichedFinalists]).filter((candidate) => candidate.score >= MIN_SCORE);
   const selected = selectDiverseCandidates(
     qualified.filter((candidate) => finalists.some((finalist) => finalist.game.aoe4worldGameId === candidate.game.aoe4worldGameId)),
@@ -938,8 +956,9 @@ async function refreshTrackedPlayersIfNeeded(force = false) {
   return profileIds;
 }
 
-async function loadCivStats() {
+async function loadCivStats(ratingFilter?: string) {
   const url = new URL(`${API_BASE}/stats/rm_solo/civilizations`);
+  applyRatingFilter(url, ratingFilter);
   const payload = await fetchJson<{ data?: unknown[] }>(url);
   const stats = new Map<string, CivStat>();
   for (const raw of arrayValue(payload.data)) {
@@ -955,8 +974,9 @@ async function loadCivStats() {
   return stats;
 }
 
-async function loadMatchupStats() {
+async function loadMatchupStats(ratingFilter?: string) {
   const url = new URL(`${API_BASE}/stats/rm_solo/matchups`);
+  applyRatingFilter(url, ratingFilter);
   const payload = await fetchJson<{ data?: unknown[] }>(url);
   const stats = new Map<string, MatchupStat>();
   for (const raw of arrayValue(payload.data)) {
@@ -973,6 +993,41 @@ async function loadMatchupStats() {
     stats.set(`${civilization}|${otherCivilization}`, stat);
   }
   return stats;
+}
+
+async function fetchCurrentMapPool() {
+  const url = new URL(`${API_BASE}/stats/rm_solo/maps`);
+  const payload = await fetchJson<{ data?: unknown[]; patch?: unknown }>(url);
+  const maps = arrayValue(payload.data)
+    .map(record)
+    .map((item): MapPoolMap | null => {
+      const map = stringValue(item.map);
+      const mapId = intValue(item.map_id, item.mapId);
+      if (!map || mapId == null) return null;
+      return {
+        map,
+        mapId,
+        gamesCount: intValue(item.games_count, item.gamesCount),
+      };
+    })
+    .filter((map): map is MapPoolMap => Boolean(map));
+  return {
+    patch: stringValue(payload.patch),
+    maps,
+  };
+}
+
+async function updateMapPool() {
+  const mapPool = await fetchCurrentMapPool();
+  await MAP_POOL_DOC.set(
+    {
+      updatedAt: FieldValue.serverTimestamp(),
+      patch: mapPool.patch,
+      maps: mapPool.maps,
+    },
+    { merge: true },
+  );
+  return mapPool;
 }
 
 function rotateProfileIds(profileIds: string[], offset: number) {
@@ -1134,10 +1189,12 @@ async function runScan(forcePlayers = false, options: { allowDeepFallback?: bool
     await pruneExpiredFallback();
     const primarySince = new Date(Date.now() - PRIMARY_LOOKBACK_HOURS * 60 * 60 * 1000);
     const expandedSince = new Date(Date.now() - CANDIDATE_LOOKBACK_HOURS * 60 * 60 * 1000);
-    const [profileIds, civStats, matchupStats] = await Promise.all([
+    const [profileIds, civStats, eliteCivStats, matchupStats, eliteMatchupStats] = await Promise.all([
       refreshTrackedPlayersIfNeeded(forcePlayers),
       loadCivStats(),
+      loadCivStats(">1700"),
       loadMatchupStats(),
+      loadMatchupStats(">1700"),
     ]);
     const excludedGameIds = await loadExcludedGameIds();
     const scanStateSnapshot = await SCAN_STATE_DOC.get();
@@ -1149,7 +1206,7 @@ async function runScan(forcePlayers = false, options: { allowDeepFallback?: bool
     let games = primaryGames;
     let fetchDiagnostics = primaryFetch.diagnostics;
     let expandedFetchDiagnostics: FetchDiagnostics | null = null;
-    let selection = await selectOutlierCandidates(primaryGames, civStats, matchupStats);
+    let selection = await selectOutlierCandidates(primaryGames, civStats, eliteCivStats, matchupStats, eliteMatchupStats);
     let rejectedCached = await rememberRejectedGames(primaryGames, selection.qualified);
     let lookbackHours = PRIMARY_LOOKBACK_HOURS;
     let expanded = false;
@@ -1160,7 +1217,7 @@ async function runScan(forcePlayers = false, options: { allowDeepFallback?: bool
       games = expandedGames;
       fetchDiagnostics = expandedFetch.diagnostics;
       expandedFetchDiagnostics = expandedFetch.diagnostics;
-      selection = await selectOutlierCandidates(expandedGames, civStats, matchupStats);
+      selection = await selectOutlierCandidates(expandedGames, civStats, eliteCivStats, matchupStats, eliteMatchupStats);
       rejectedCached = await rememberRejectedGames(expandedGames, selection.qualified);
       lookbackHours = CANDIDATE_LOOKBACK_HOURS;
       expanded = true;
@@ -1452,9 +1509,11 @@ async function updatePublicMetaSnapshots() {
 }
 
 async function rescoreSavedOutliers(dryRun = true) {
-  const [civStats, matchupStats, snapshot] = await Promise.all([
+  const [civStats, eliteCivStats, matchupStats, eliteMatchupStats, snapshot] = await Promise.all([
     loadCivStats(),
+    loadCivStats(">1700"),
     loadMatchupStats(),
+    loadMatchupStats(">1700"),
     OUTLIER_COLLECTION.where("expiresAt", ">=", Timestamp.fromDate(new Date())).limit(250).get(),
   ]);
 
@@ -1468,9 +1527,9 @@ async function rescoreSavedOutliers(dryRun = true) {
     try {
       const data = record(doc.data());
       const game = storedGameFromData(doc.id, data);
-      const baseScore = scoreGame(game, civStats);
+      const baseScore = scoreGame(game, civStats, eliteCivStats);
       let candidate: ScoredCandidate = { game, ...baseScore };
-      if (candidate.score >= MIN_SCORE) candidate = await enrichCandidateWithSummary(candidate, matchupStats);
+      if (candidate.score >= MIN_SCORE) candidate = await enrichCandidateWithSummary(candidate, matchupStats, eliteMatchupStats);
 
       const oldScore = Number(data.score ?? 0);
       if (candidate.score < MIN_SCORE) {
@@ -1558,6 +1617,16 @@ export const scanOutliersNow = onRequest({ region: "us-central1", timeoutSeconds
     owner: "manual",
   });
   response.json(result);
+});
+
+export const refreshMapPoolNow = onRequest({ region: "us-central1", timeoutSeconds: 120, memory: "256MiB" }, async (request, response) => {
+  const secret = process.env.MANUAL_SCAN_SECRET;
+  if (secret && request.query.secret !== secret) {
+    response.status(403).json({ ok: false, error: "Forbidden" });
+    return;
+  }
+  const result = await updateMapPool();
+  response.json({ ok: true, patch: result.patch, mapsCount: result.maps.length, maps: result.maps });
 });
 
 export const rescoreSavedOutliersNow = onRequest({ region: "us-central1", timeoutSeconds: 540, memory: "512MiB" }, async (request, response) => {

@@ -19,6 +19,13 @@
         }
       },
       {
+        "source": "/refreshMapPoolNow",
+        "function": {
+          "functionId": "refreshMapPoolNow",
+          "region": "us-central1"
+        }
+      },
+      {
         "source": "**",
         "destination": "/index.html"
       }
