@@ -14,13 +14,14 @@ const SCAN_STATE_DOC = db.collection("meta").doc("scanState");
 const SCAN_LOCK_DOC = db.collection("meta").doc("scanLock");
 const PUBLIC_STATUS_DOC = db.collection("meta").doc("publicStatus");
 const HOMEPAGE_HIGHLIGHTS_DOC = db.collection("meta").doc("homepageHighlights");
+const ARCHIVE_SNAPSHOT_DOC = db.collection("meta").doc("archiveSnapshot");
 const OUTLIER_COLLECTION = db.collection("outlierGames");
 const IGNORED_COLLECTION = db.collection("ignoredGames");
 const MIN_RATING = 1700;
 const MAX_LEADERBOARD_PAGES = 12;
 const BATCH_SIZE = 50;
 const REQUEST_DELAY_MS = 4000;
-const MAX_GAME_PAGES_PER_BATCH = 2;
+const MAX_GAME_PAGES_PER_BATCH = 1;
 const MAX_GAME_REQUESTS_PER_SCAN = 4;
 const ADAPTIVE_MAX_GAME_REQUESTS_PER_SCAN = 8;
 const MIN_FRESH_GAMES_BEFORE_STOPPING = 40;
@@ -32,9 +33,10 @@ const FRESH_PICK_SCAN_WINDOW = 3;
 const MIN_GAME_DURATION_SECONDS = 8 * 60;
 const MIN_SCORE = 32;
 const ELITE_MMR = 2000;
-const CANDIDATE_LOOKBACK_HOURS = 48;
+const CANDIDATE_LOOKBACK_HOURS = 12;
 const IGNORED_GAME_TTL_HOURS = 24;
 const PRIMARY_LOOKBACK_HOURS = 6;
+const ARCHIVE_SNAPSHOT_LIMIT = 200;
 
 type AnyRecord = Record<string, unknown>;
 
@@ -107,6 +109,7 @@ type FetchDiagnostics = {
   skippedAlreadyExcluded: number;
   skippedLowRating: number;
   skippedInvalid: number;
+  eligibleGamesCollected: number;
   freshGamesCollected: number;
   startPlayerOffset: number;
   nextPlayerOffset: number;
@@ -619,6 +622,18 @@ function countDestroyedBuildings(player: AnyRecord, patterns: string[]) {
   return count;
 }
 
+function constructedBuildingTimes(player: AnyRecord, patterns: string[]) {
+  const times: number[] = [];
+  for (const raw of arrayValue(player.buildOrder)) {
+    const entry = record(raw);
+    if (stringValue(entry.type) !== "Building") continue;
+    const icon = stringValue(entry.icon) ?? "";
+    if (!patterns.some((pattern) => icon.includes(pattern))) continue;
+    times.push(...numberArray(entry.finished).filter((time) => time > 0));
+  }
+  return times.sort((a, b) => a - b);
+}
+
 function analyzeSummary(candidate: ScoredCandidate, summary: unknown) {
   const payload = record(summary);
   const players = arrayValue(payload.players).map(record);
@@ -652,6 +667,32 @@ function analyzeSummary(candidate: ScoredCandidate, summary: unknown) {
     addSummaryReason(candidate, "summary_dark_age_aggression", `Game summary: military unit produced before 3 minutes`, 12, "Dark age pressure");
   } else if (firstMilitary != null && firstMilitary >= 600 && (candidate.game.durationSeconds ?? 0) >= 18 * 60) {
     addSummaryReason(candidate, "summary_delayed_military", `Game summary: first military unit after 10 minutes`, 12, "Odd build");
+  }
+
+  const extraTownCenterTimes = constructedBuildingTimes(winnerSummary, [
+    "town_center",
+    "town_centre",
+    "town_centre_capitol",
+    "town_centre_capital",
+  ]);
+  if (extraTownCenterTimes.length >= 2) {
+    const secondTcTime = extraTownCenterTimes[1];
+    addSummaryReason(
+      candidate,
+      "summary_multi_tc",
+      `Game summary: winner went multiple Town Centers, second TC completed at ${Math.floor(secondTcTime / 60)}:${String(secondTcTime % 60).padStart(2, "0")}`,
+      8,
+      "Multi-TC",
+    );
+  } else if (extraTownCenterTimes.length === 1 && extraTownCenterTimes[0] >= 180) {
+    const secondTcTime = extraTownCenterTimes[0];
+    addSummaryReason(
+      candidate,
+      "summary_multi_tc",
+      `Game summary: winner added a second Town Center at ${Math.floor(secondTcTime / 60)}:${String(secondTcTime % 60).padStart(2, "0")}`,
+      8,
+      "Multi-TC",
+    );
   }
 
   if (loserSummary) {
@@ -955,6 +996,7 @@ async function fetchCandidateGames(profileIds: string[], since: Date, excludedGa
     skippedAlreadyExcluded: 0,
     skippedLowRating: 0,
     skippedInvalid: 0,
+    eligibleGamesCollected: 0,
     freshGamesCollected: 0,
     startPlayerOffset: normalizedStartOffset,
     nextPlayerOffset: normalizedStartOffset,
@@ -1005,6 +1047,7 @@ async function fetchCandidateGames(profileIds: string[], since: Date, excludedGa
           continue;
         }
         games.set(game.aoe4worldGameId, game);
+        diagnostics.eligibleGamesCollected = games.size;
         diagnostics.freshGamesCollected = games.size;
         if (games.size >= MAX_GAMES_PER_SCAN) return { games: Array.from(games.values()).slice(0, MAX_GAMES_PER_SCAN), diagnostics };
       }
@@ -1105,16 +1148,18 @@ async function runScan(forcePlayers = false, options: { allowDeepFallback?: bool
     const primaryGames = primaryFetch.games;
     let games = primaryGames;
     let fetchDiagnostics = primaryFetch.diagnostics;
+    let expandedFetchDiagnostics: FetchDiagnostics | null = null;
     let selection = await selectOutlierCandidates(primaryGames, civStats, matchupStats);
     let rejectedCached = await rememberRejectedGames(primaryGames, selection.qualified);
     let lookbackHours = PRIMARY_LOOKBACK_HOURS;
     let expanded = false;
 
     if (options.allowDeepFallback !== false && selection.selected.length < GAMES_TO_SAVE_PER_SCAN) {
-      const expandedFetch = await fetchCandidateGames(profileIds, expandedSince, excludedGameIds, startPlayerOffset);
+      const expandedFetch = await fetchCandidateGames(profileIds, expandedSince, excludedGameIds, primaryFetch.diagnostics.nextPlayerOffset);
       const expandedGames = expandedFetch.games;
       games = expandedGames;
       fetchDiagnostics = expandedFetch.diagnostics;
+      expandedFetchDiagnostics = expandedFetch.diagnostics;
       selection = await selectOutlierCandidates(expandedGames, civStats, matchupStats);
       rejectedCached = await rememberRejectedGames(expandedGames, selection.qualified);
       lookbackHours = CANDIDATE_LOOKBACK_HOURS;
@@ -1143,6 +1188,14 @@ async function runScan(forcePlayers = false, options: { allowDeepFallback?: bool
     const selectedGameUrls = Object.fromEntries(
       selection.selected.map((candidate) => [candidate.game.aoe4worldGameId, candidate.summaryUrl ?? candidate.game.aoe4worldUrl]),
     );
+    const totalApiRequestsMade = primaryFetch.diagnostics.apiRequestsMade + (expandedFetchDiagnostics?.apiRequestsMade ?? 0);
+    const totalRawGamesFetched = primaryFetch.diagnostics.rawGamesFetched + (expandedFetchDiagnostics?.rawGamesFetched ?? 0);
+    const totalSkippedAlreadyExcluded =
+      primaryFetch.diagnostics.skippedAlreadyExcluded + (expandedFetchDiagnostics?.skippedAlreadyExcluded ?? 0);
+    const totalSkippedLowRating = primaryFetch.diagnostics.skippedLowRating + (expandedFetchDiagnostics?.skippedLowRating ?? 0);
+    const totalSkippedInvalid = primaryFetch.diagnostics.skippedInvalid + (expandedFetchDiagnostics?.skippedInvalid ?? 0);
+    const totalEligibleGamesCollected =
+      primaryFetch.diagnostics.eligibleGamesCollected + (expandedFetchDiagnostics?.eligibleGamesCollected ?? 0);
     await markFreshPicks(selectedGameIds);
     const message = selection.selected.length
       ? `Stored ${selection.selected.length} games: ${selectedGameIds.join(", ")}.`
@@ -1171,6 +1224,7 @@ async function runScan(forcePlayers = false, options: { allowDeepFallback?: bool
           lookbackHours,
           expandedLookback: expanded,
           primaryGamesChecked: primaryGames.length,
+          expandedGamesChecked: expanded ? games.length : 0,
           selectedGameId: selectedGameIds[0] ?? null,
           selectedGameIds,
           selectedGameUrls,
@@ -1178,24 +1232,49 @@ async function runScan(forcePlayers = false, options: { allowDeepFallback?: bool
           summaryFinalistsChecked: selection.finalists.length,
           excludedGames: excludedGameIds.size,
           rejectedCached,
+          totalApiRequestsMade,
           apiRequestsMade: fetchDiagnostics.apiRequestsMade,
           primaryApiRequestsMade: primaryFetch.diagnostics.apiRequestsMade,
+          expandedApiRequestsMade: expandedFetchDiagnostics?.apiRequestsMade ?? 0,
+          totalRawGamesFetched,
           rawGamesFetched: fetchDiagnostics.rawGamesFetched,
           primaryRawGamesFetched: primaryFetch.diagnostics.rawGamesFetched,
+          expandedRawGamesFetched: expandedFetchDiagnostics?.rawGamesFetched ?? 0,
+          totalSkippedAlreadyExcluded,
           skippedAlreadyExcluded: fetchDiagnostics.skippedAlreadyExcluded,
+          primarySkippedAlreadyExcluded: primaryFetch.diagnostics.skippedAlreadyExcluded,
+          expandedSkippedAlreadyExcluded: expandedFetchDiagnostics?.skippedAlreadyExcluded ?? 0,
+          totalSkippedLowRating,
           skippedLowRating: fetchDiagnostics.skippedLowRating,
+          primarySkippedLowRating: primaryFetch.diagnostics.skippedLowRating,
+          expandedSkippedLowRating: expandedFetchDiagnostics?.skippedLowRating ?? 0,
+          totalSkippedInvalid,
           skippedInvalid: fetchDiagnostics.skippedInvalid,
+          primarySkippedInvalid: primaryFetch.diagnostics.skippedInvalid,
+          expandedSkippedInvalid: expandedFetchDiagnostics?.skippedInvalid ?? 0,
+          totalEligibleGamesCollected,
+          eligibleGamesCollected: fetchDiagnostics.eligibleGamesCollected,
+          primaryEligibleGamesCollected: primaryFetch.diagnostics.eligibleGamesCollected,
+          expandedEligibleGamesCollected: expandedFetchDiagnostics?.eligibleGamesCollected ?? 0,
           freshGamesCollected: fetchDiagnostics.freshGamesCollected,
+          primaryFreshGamesCollected: primaryFetch.diagnostics.freshGamesCollected,
+          expandedFreshGamesCollected: expandedFetchDiagnostics?.freshGamesCollected ?? 0,
           startPlayerOffset: fetchDiagnostics.startPlayerOffset,
+          primaryStartPlayerOffset: primaryFetch.diagnostics.startPlayerOffset,
+          expandedStartPlayerOffset: expandedFetchDiagnostics?.startPlayerOffset ?? null,
           nextPlayerOffset: fetchDiagnostics.nextPlayerOffset,
+          primaryNextPlayerOffset: primaryFetch.diagnostics.nextPlayerOffset,
+          expandedNextPlayerOffset: expandedFetchDiagnostics?.nextPlayerOffset ?? null,
           playerBatchesChecked: fetchDiagnostics.playerBatchesChecked,
+          primaryPlayerBatchesChecked: primaryFetch.diagnostics.playerBatchesChecked,
+          expandedPlayerBatchesChecked: expandedFetchDiagnostics?.playerBatchesChecked ?? 0,
           ignoredGameTtlHours: IGNORED_GAME_TTL_HOURS,
           message,
         },
         { merge: true },
       ),
     ]);
-    const homepageHighlightCount = await updateHomepageHighlights();
+    const { homepageHighlightCount, archiveSnapshotCount } = await updatePublicMetaSnapshots();
 
     return {
       ok: true,
@@ -1207,6 +1286,7 @@ async function runScan(forcePlayers = false, options: { allowDeepFallback?: bool
       lookbackHours,
       expandedLookback: expanded,
       primaryGamesChecked: primaryGames.length,
+      expandedGamesChecked: expanded ? games.length : 0,
       selectedGameId: selectedGameIds[0] ?? null,
       selectedGameIds,
       selectedGameUrls,
@@ -1214,19 +1294,45 @@ async function runScan(forcePlayers = false, options: { allowDeepFallback?: bool
       summaryFinalistsChecked: selection.finalists.length,
       excludedGames: excludedGameIds.size,
       rejectedCached,
+      totalApiRequestsMade,
       apiRequestsMade: fetchDiagnostics.apiRequestsMade,
       primaryApiRequestsMade: primaryFetch.diagnostics.apiRequestsMade,
+      expandedApiRequestsMade: expandedFetchDiagnostics?.apiRequestsMade ?? 0,
+      totalRawGamesFetched,
       rawGamesFetched: fetchDiagnostics.rawGamesFetched,
       primaryRawGamesFetched: primaryFetch.diagnostics.rawGamesFetched,
+      expandedRawGamesFetched: expandedFetchDiagnostics?.rawGamesFetched ?? 0,
+      totalSkippedAlreadyExcluded,
       skippedAlreadyExcluded: fetchDiagnostics.skippedAlreadyExcluded,
+      primarySkippedAlreadyExcluded: primaryFetch.diagnostics.skippedAlreadyExcluded,
+      expandedSkippedAlreadyExcluded: expandedFetchDiagnostics?.skippedAlreadyExcluded ?? 0,
+      totalSkippedLowRating,
       skippedLowRating: fetchDiagnostics.skippedLowRating,
+      primarySkippedLowRating: primaryFetch.diagnostics.skippedLowRating,
+      expandedSkippedLowRating: expandedFetchDiagnostics?.skippedLowRating ?? 0,
+      totalSkippedInvalid,
       skippedInvalid: fetchDiagnostics.skippedInvalid,
+      primarySkippedInvalid: primaryFetch.diagnostics.skippedInvalid,
+      expandedSkippedInvalid: expandedFetchDiagnostics?.skippedInvalid ?? 0,
+      totalEligibleGamesCollected,
+      eligibleGamesCollected: fetchDiagnostics.eligibleGamesCollected,
+      primaryEligibleGamesCollected: primaryFetch.diagnostics.eligibleGamesCollected,
+      expandedEligibleGamesCollected: expandedFetchDiagnostics?.eligibleGamesCollected ?? 0,
       freshGamesCollected: fetchDiagnostics.freshGamesCollected,
+      primaryFreshGamesCollected: primaryFetch.diagnostics.freshGamesCollected,
+      expandedFreshGamesCollected: expandedFetchDiagnostics?.freshGamesCollected ?? 0,
       startPlayerOffset: fetchDiagnostics.startPlayerOffset,
+      primaryStartPlayerOffset: primaryFetch.diagnostics.startPlayerOffset,
+      expandedStartPlayerOffset: expandedFetchDiagnostics?.startPlayerOffset ?? null,
       nextPlayerOffset: fetchDiagnostics.nextPlayerOffset,
+      primaryNextPlayerOffset: primaryFetch.diagnostics.nextPlayerOffset,
+      expandedNextPlayerOffset: expandedFetchDiagnostics?.nextPlayerOffset ?? null,
       playerBatchesChecked: fetchDiagnostics.playerBatchesChecked,
+      primaryPlayerBatchesChecked: primaryFetch.diagnostics.playerBatchesChecked,
+      expandedPlayerBatchesChecked: expandedFetchDiagnostics?.playerBatchesChecked ?? 0,
       ignoredGameTtlHours: IGNORED_GAME_TTL_HOURS,
       homepageHighlightCount,
+      archiveSnapshotCount,
     };
   } catch (error) {
     const message = error instanceof Error ? error.message : "Unknown scan error";
@@ -1317,6 +1423,34 @@ async function updateHomepageHighlights() {
   return highlights.length;
 }
 
+async function updateArchiveSnapshot() {
+  const snapshot = await OUTLIER_COLLECTION.where("expiresAt", ">=", Timestamp.fromDate(new Date())).limit(ARCHIVE_SNAPSHOT_LIMIT).get();
+  const games = snapshot.docs
+    .map((doc) => storedOutlierFromData(doc.id, record(doc.data())))
+    .sort((a, b) => b.selectedAt.getTime() - a.selectedAt.getTime())
+    .slice(0, ARCHIVE_SNAPSHOT_LIMIT)
+    .map(serializeStoredOutlierGame);
+
+  await ARCHIVE_SNAPSHOT_DOC.set(
+    {
+      updatedAt: FieldValue.serverTimestamp(),
+      limit: ARCHIVE_SNAPSHOT_LIMIT,
+      count: games.length,
+      games,
+    },
+    { merge: true },
+  );
+  return games.length;
+}
+
+async function updatePublicMetaSnapshots() {
+  const [homepageHighlightCount, archiveSnapshotCount] = await Promise.all([
+    updateHomepageHighlights(),
+    updateArchiveSnapshot(),
+  ]);
+  return { homepageHighlightCount, archiveSnapshotCount };
+}
+
 async function rescoreSavedOutliers(dryRun = true) {
   const [civStats, matchupStats, snapshot] = await Promise.all([
     loadCivStats(),
@@ -1382,7 +1516,7 @@ async function rescoreSavedOutliers(dryRun = true) {
   }
 
   if (!dryRun && writes > 0) await batch.commit();
-  const homepageHighlightCount = dryRun ? null : await updateHomepageHighlights();
+  const metaSnapshotCounts = dryRun ? null : await updatePublicMetaSnapshots();
 
   return {
     ok: true,
@@ -1391,7 +1525,8 @@ async function rescoreSavedOutliers(dryRun = true) {
     keptCount: kept.length,
     removedCount: removed.length,
     skippedCount: skipped.length,
-    homepageHighlightCount,
+    homepageHighlightCount: metaSnapshotCounts?.homepageHighlightCount ?? null,
+    archiveSnapshotCount: metaSnapshotCounts?.archiveSnapshotCount ?? null,
     kept,
     removed,
     skipped,

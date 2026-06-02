@@ -154,7 +154,13 @@ export function GameCard({
               >
                 <div className="flex items-center justify-between gap-3">
                   <div className="min-w-0">
-                    <div className="truncate text-sm font-semibold text-white">{participant.name}</div>
+                    <Link
+                      href={playerPageUrl(participant)}
+                      target="_blank"
+                      className="block truncate text-sm font-semibold text-white transition hover:text-sky-200"
+                    >
+                      {participant.name}
+                    </Link>
                     <div className="mt-1 flex flex-wrap items-center gap-2">
                       <CivilizationPill civilization={participant.civilization} />
                       <span className="rounded-sm border border-white/10 bg-white/[0.03] px-2 py-0.5 text-xs text-slate-300">

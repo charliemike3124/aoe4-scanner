@@ -29,7 +29,8 @@ type FeedFilters = {
   bookmarkedOnly?: boolean;
 };
 
-const CACHE_TTL_MS = 5 * 60 * 1000;
+const CACHE_TTL_MS = 15 * 60 * 1000;
+const ARCHIVE_PAGE_SIZE = 20;
 const CACHE_PREFIX = 'aoe4scanner:feed-cache:';
 const BOOKMARKS_KEY = 'aoe4scanner:bookmarks';
 const LAST_SEEN_KEY = 'aoe4scanner:last-seen-selected-at';
@@ -197,8 +198,8 @@ function HighlightsSection({
   );
 }
 
-function cacheKey(mode: FeedMode, pageSize?: number) {
-  return `${CACHE_PREFIX}${JSON.stringify({ mode, pageSize })}`;
+function cacheKey(mode: FeedMode, pageSize?: number, showHighlights = false) {
+  return `${CACHE_PREFIX}${JSON.stringify({ mode, pageSize, showHighlights })}`;
 }
 
 function highlightFromData(entry: unknown): Highlight | null {
@@ -230,6 +231,7 @@ export function OutlierFeed({
   const [bookmarks, setBookmarks] = useState<Set<string>>(new Set());
   const [lastSeenAt, setLastSeenAt] = useState(0);
   const [spoilerLight, setSpoilerLight] = useState(false);
+  const [currentPage, setCurrentPage] = useState(1);
 
   useEffect(() => {
     setBookmarks(readBookmarks());
@@ -246,7 +248,7 @@ export function OutlierFeed({
 
   useEffect(() => {
     let cancelled = false;
-    const key = cacheKey(mode, pageSize);
+    const key = cacheKey(mode, pageSize, showHighlights);
 
     async function load() {
       setLoading(true);
@@ -278,22 +280,28 @@ export function OutlierFeed({
           }
         }
 
-        const fetchLimit = pageSize ?? (mode === 'latest' ? 10 : 250);
-        const clauses = [
-          orderBy('selectedAt', 'desc'),
-          limit(fetchLimit),
-        ];
-        const gamesQuery = query(collection(db, 'outlierGames'), ...clauses);
+        const fetchLimit = mode === 'latest' ? pageSize ?? 15 : 250;
+        const fallbackGamesQuery = query(collection(db, 'outlierGames'), orderBy('selectedAt', 'desc'), limit(fetchLimit));
+        const archiveSnapshotPromise = getDoc(doc(db, 'meta', 'archiveSnapshot')).catch(() => null);
         const highlightPromise = showHighlights
           ? getDoc(doc(db, 'meta', 'homepageHighlights')).catch(() => null)
           : Promise.resolve(null);
-        const [snapshot, statusSnapshot, highlightsSnapshot] = await Promise.all([
-          getDocs(gamesQuery),
+        const [archiveSnapshot, statusSnapshot, highlightsSnapshot] = await Promise.all([
+          archiveSnapshotPromise,
           getDoc(doc(db, 'meta', 'publicStatus')),
           highlightPromise,
         ]);
         if (cancelled) return;
-        const nextGames = snapshot.docs.map((gameDoc) => outlierFromSnapshot(gameDoc)).sort(newestPickedFirst);
+        let nextGames =
+          archiveSnapshot?.exists() && Array.isArray(archiveSnapshot.data().games)
+            ? (archiveSnapshot.data().games as unknown[]).map((game) => hydrateGame(game as Record<string, unknown>))
+            : [];
+        if (!nextGames.length) {
+          const snapshot = await getDocs(fallbackGamesQuery);
+          if (cancelled) return;
+          nextGames = snapshot.docs.map((gameDoc) => outlierFromSnapshot(gameDoc));
+        }
+        nextGames = nextGames.sort(newestPickedFirst).slice(0, fetchLimit);
         const nextStatus = statusFromData(statusSnapshot.data());
         const nextHighlights =
           highlightsSnapshot?.exists()
@@ -329,17 +337,32 @@ export function OutlierFeed({
   }, [
     mode,
     pageSize,
+    showHighlights,
   ]);
 
   const visibleGames = useMemo(
     () => games.filter((game) => matchesClientFilters(game, filters, bookmarks)).sort(newestPickedFirst),
     [bookmarks, filters, games],
   );
-  const feedGames = useMemo(() => (mode === 'latest' && pageSize ? visibleGames.slice(0, pageSize) : visibleGames), [mode, pageSize, visibleGames]);
+  const filterKey = JSON.stringify(filters);
+  const totalPages = Math.max(1, Math.ceil(visibleGames.length / ARCHIVE_PAGE_SIZE));
+  const feedGames = useMemo(() => {
+    if (mode === 'latest') return visibleGames.slice(0, pageSize ?? 15);
+    const start = (currentPage - 1) * ARCHIVE_PAGE_SIZE;
+    return visibleGames.slice(start, start + ARCHIVE_PAGE_SIZE);
+  }, [currentPage, mode, pageSize, visibleGames]);
   const highlights = useMemo(
     () => (showHighlights ? (savedHighlights.length ? savedHighlights : selectHighlights(games)) : []),
     [games, savedHighlights, showHighlights],
   );
+
+  useEffect(() => {
+    setCurrentPage(1);
+  }, [bookmarks, filterKey]);
+
+  useEffect(() => {
+    setCurrentPage((page) => Math.min(page, totalPages));
+  }, [totalPages]);
 
   useEffect(() => {
     if (!visibleGames.length) return;
@@ -368,7 +391,9 @@ export function OutlierFeed({
   const countLabel =
     mode === 'latest'
       ? `Showing ${feedGames.length} latest games (Updated hourly)`
-      : `${feedGames.length} matching games`;
+      : visibleGames.length
+        ? `Showing ${(currentPage - 1) * ARCHIVE_PAGE_SIZE + 1}-${(currentPage - 1) * ARCHIVE_PAGE_SIZE + feedGames.length} of ${visibleGames.length} matching games`
+        : 'No matching games';
 
   if (loading) {
     return <EmptyState title='Loading outliers' description='Fetching the latest saved games.' />;
@@ -383,10 +408,12 @@ export function OutlierFeed({
       {highlights.length ? <HighlightsSection highlights={highlights} spoilerLight={spoilerLight} lastSeenAt={lastSeenAt} /> : null}
       {feedGames.length ? (
         <section className='space-y-3'>
-          <div>
-            <h2 className='text-xl font-black text-white'>Latest games</h2>
-            <p className='text-sm text-slate-400'>The newest outlier games saved by the scanner.</p>
-          </div>
+          {mode === 'latest' ? (
+            <div>
+              <h2 className='text-xl font-black text-white'>Latest games</h2>
+              <p className='text-sm text-slate-400'>The newest outlier games saved by the scanner.</p>
+            </div>
+          ) : null}
           <div className='flex flex-wrap items-center justify-between gap-3 text-sm text-slate-400'>
             <span>{countLabel}</span>
             <div className='flex flex-wrap items-center gap-3'>
@@ -411,6 +438,29 @@ export function OutlierFeed({
                 isNew={outlier.selectedAt.getTime() > lastSeenAt}
               />
             ))}
+            {mode === 'archive' && totalPages > 1 ? (
+              <div className='flex flex-wrap items-center justify-center gap-3 pt-2 text-sm text-slate-300'>
+                <button
+                  type='button'
+                  onClick={() => setCurrentPage((page) => Math.max(1, page - 1))}
+                  disabled={currentPage === 1}
+                  className='rounded-md border border-white/10 px-3 py-2 font-bold text-white disabled:cursor-not-allowed disabled:opacity-40'
+                >
+                  Previous
+                </button>
+                <span>
+                  Page {currentPage} of {totalPages}
+                </span>
+                <button
+                  type='button'
+                  onClick={() => setCurrentPage((page) => Math.min(totalPages, page + 1))}
+                  disabled={currentPage === totalPages}
+                  className='rounded-md border border-white/10 px-3 py-2 font-bold text-white disabled:cursor-not-allowed disabled:opacity-40'
+                >
+                  Next
+                </button>
+              </div>
+            ) : null}
             <ScrollToTopButton />
           </div>
         </section>

@@ -16,6 +16,7 @@ type ScanRun = {
   type: string | null;
   gamesChecked: number | null;
   primaryGamesChecked: number | null;
+  expandedGamesChecked: number | null;
   candidatesFound: number | null;
   baseCandidatesFound: number | null;
   eliteProbesChecked: number | null;
@@ -24,17 +25,42 @@ type ScanRun = {
   summaryFinalistsChecked: number | null;
   excludedGames: number | null;
   rejectedCached: number | null;
+  totalApiRequestsMade: number | null;
   apiRequestsMade: number | null;
   primaryApiRequestsMade: number | null;
+  expandedApiRequestsMade: number | null;
+  totalRawGamesFetched: number | null;
+  expandedRawGamesFetched: number | null;
   rawGamesFetched: number | null;
   primaryRawGamesFetched: number | null;
+  totalSkippedAlreadyExcluded: number | null;
   skippedAlreadyExcluded: number | null;
+  primarySkippedAlreadyExcluded: number | null;
+  expandedSkippedAlreadyExcluded: number | null;
+  totalSkippedLowRating: number | null;
   skippedLowRating: number | null;
+  primarySkippedLowRating: number | null;
+  expandedSkippedLowRating: number | null;
+  totalSkippedInvalid: number | null;
   skippedInvalid: number | null;
+  primarySkippedInvalid: number | null;
+  expandedSkippedInvalid: number | null;
+  totalEligibleGamesCollected: number | null;
+  eligibleGamesCollected: number | null;
+  primaryEligibleGamesCollected: number | null;
+  expandedEligibleGamesCollected: number | null;
   freshGamesCollected: number | null;
+  primaryFreshGamesCollected: number | null;
+  expandedFreshGamesCollected: number | null;
   startPlayerOffset: number | null;
+  primaryStartPlayerOffset: number | null;
+  expandedStartPlayerOffset: number | null;
   nextPlayerOffset: number | null;
+  primaryNextPlayerOffset: number | null;
+  expandedNextPlayerOffset: number | null;
   playerBatchesChecked: number | null;
+  primaryPlayerBatchesChecked: number | null;
+  expandedPlayerBatchesChecked: number | null;
   ignoredGameTtlHours: number | null;
   lookbackHours: number | null;
   expandedLookback: boolean;
@@ -70,6 +96,7 @@ function readScanRun(id: string, data: DocumentData): ScanRun {
     type: typeof data.type === "string" ? data.type : null,
     gamesChecked: numberOrNull(data.gamesChecked),
     primaryGamesChecked: numberOrNull(data.primaryGamesChecked),
+    expandedGamesChecked: numberOrNull(data.expandedGamesChecked),
     candidatesFound: numberOrNull(data.candidatesFound),
     baseCandidatesFound: numberOrNull(data.baseCandidatesFound),
     eliteProbesChecked: numberOrNull(data.eliteProbesChecked),
@@ -78,17 +105,42 @@ function readScanRun(id: string, data: DocumentData): ScanRun {
     summaryFinalistsChecked: numberOrNull(data.summaryFinalistsChecked),
     excludedGames: numberOrNull(data.excludedGames),
     rejectedCached: numberOrNull(data.rejectedCached),
+    totalApiRequestsMade: numberOrNull(data.totalApiRequestsMade),
     apiRequestsMade: numberOrNull(data.apiRequestsMade),
     primaryApiRequestsMade: numberOrNull(data.primaryApiRequestsMade),
+    expandedApiRequestsMade: numberOrNull(data.expandedApiRequestsMade),
+    totalRawGamesFetched: numberOrNull(data.totalRawGamesFetched),
     rawGamesFetched: numberOrNull(data.rawGamesFetched),
     primaryRawGamesFetched: numberOrNull(data.primaryRawGamesFetched),
+    expandedRawGamesFetched: numberOrNull(data.expandedRawGamesFetched),
+    totalSkippedAlreadyExcluded: numberOrNull(data.totalSkippedAlreadyExcluded),
     skippedAlreadyExcluded: numberOrNull(data.skippedAlreadyExcluded),
+    primarySkippedAlreadyExcluded: numberOrNull(data.primarySkippedAlreadyExcluded),
+    expandedSkippedAlreadyExcluded: numberOrNull(data.expandedSkippedAlreadyExcluded),
+    totalSkippedLowRating: numberOrNull(data.totalSkippedLowRating),
     skippedLowRating: numberOrNull(data.skippedLowRating),
+    primarySkippedLowRating: numberOrNull(data.primarySkippedLowRating),
+    expandedSkippedLowRating: numberOrNull(data.expandedSkippedLowRating),
+    totalSkippedInvalid: numberOrNull(data.totalSkippedInvalid),
     skippedInvalid: numberOrNull(data.skippedInvalid),
+    primarySkippedInvalid: numberOrNull(data.primarySkippedInvalid),
+    expandedSkippedInvalid: numberOrNull(data.expandedSkippedInvalid),
+    totalEligibleGamesCollected: numberOrNull(data.totalEligibleGamesCollected),
+    eligibleGamesCollected: numberOrNull(data.eligibleGamesCollected),
+    primaryEligibleGamesCollected: numberOrNull(data.primaryEligibleGamesCollected),
+    expandedEligibleGamesCollected: numberOrNull(data.expandedEligibleGamesCollected),
     freshGamesCollected: numberOrNull(data.freshGamesCollected),
+    primaryFreshGamesCollected: numberOrNull(data.primaryFreshGamesCollected),
+    expandedFreshGamesCollected: numberOrNull(data.expandedFreshGamesCollected),
     startPlayerOffset: numberOrNull(data.startPlayerOffset),
+    primaryStartPlayerOffset: numberOrNull(data.primaryStartPlayerOffset),
+    expandedStartPlayerOffset: numberOrNull(data.expandedStartPlayerOffset),
     nextPlayerOffset: numberOrNull(data.nextPlayerOffset),
+    primaryNextPlayerOffset: numberOrNull(data.primaryNextPlayerOffset),
+    expandedNextPlayerOffset: numberOrNull(data.expandedNextPlayerOffset),
     playerBatchesChecked: numberOrNull(data.playerBatchesChecked),
+    primaryPlayerBatchesChecked: numberOrNull(data.primaryPlayerBatchesChecked),
+    expandedPlayerBatchesChecked: numberOrNull(data.expandedPlayerBatchesChecked),
     ignoredGameTtlHours: numberOrNull(data.ignoredGameTtlHours),
     lookbackHours: numberOrNull(data.lookbackHours),
     expandedLookback: Boolean(data.expandedLookback),
@@ -230,6 +282,7 @@ export function ScanRunsView() {
               <dl className="mt-4 grid grid-cols-2 gap-3 md:grid-cols-5 lg:grid-cols-10">
                 <Stat label="Games" value={run.gamesChecked} />
                 <Stat label="Primary" value={run.primaryGamesChecked} />
+                <Stat label="Fallback" value={run.expandedGamesChecked} />
                 <Stat label="Qualified" value={run.candidatesFound} />
                 <Stat label="Base" value={run.baseCandidatesFound} />
                 <Stat label="Elite probes" value={run.eliteProbesChecked} />
@@ -241,18 +294,34 @@ export function ScanRunsView() {
               </dl>
 
               <dl className="mt-4 grid grid-cols-2 gap-3 border-t border-white/10 pt-4 md:grid-cols-4 lg:grid-cols-12">
-                <Stat label="API calls" value={run.apiRequestsMade} />
+                <Stat label="Total calls" value={run.totalApiRequestsMade ?? run.apiRequestsMade} />
                 <Stat label="Primary calls" value={run.primaryApiRequestsMade} />
-                <Stat label="Raw games" value={run.rawGamesFetched} />
+                <Stat label="Fallback calls" value={run.expandedApiRequestsMade} />
+                <Stat label="Total raw" value={run.totalRawGamesFetched ?? run.rawGamesFetched} />
                 <Stat label="Primary raw" value={run.primaryRawGamesFetched} />
-                <Stat label="Fresh" value={run.freshGamesCollected} />
-                <Stat label="Cache hits" value={run.skippedAlreadyExcluded} />
-                <Stat label="Low Elo" value={run.skippedLowRating} />
-                <Stat label="Invalid" value={run.skippedInvalid} />
+                <Stat label="Fallback raw" value={run.expandedRawGamesFetched} />
+                <Stat label="Total eligible" value={run.totalEligibleGamesCollected ?? run.eligibleGamesCollected ?? run.freshGamesCollected} />
+                <Stat label="Primary eligible" value={run.primaryEligibleGamesCollected ?? run.primaryFreshGamesCollected} />
+                <Stat label="Fallback eligible" value={run.expandedEligibleGamesCollected ?? run.expandedFreshGamesCollected} />
+                <Stat label="Total cache" value={run.totalSkippedAlreadyExcluded ?? run.skippedAlreadyExcluded} />
+                <Stat label="Total low Elo" value={run.totalSkippedLowRating ?? run.skippedLowRating} />
+                <Stat label="Total invalid" value={run.totalSkippedInvalid ?? run.skippedInvalid} />
                 <Stat label="Ignore TTL" value={run.ignoredGameTtlHours ? `${run.ignoredGameTtlHours}h` : null} />
                 <Stat label="Start offset" value={run.startPlayerOffset} />
                 <Stat label="Next offset" value={run.nextPlayerOffset} />
                 <Stat label="Batches" value={run.playerBatchesChecked} />
+              </dl>
+
+              <dl className="mt-4 grid grid-cols-2 gap-3 border-t border-white/10 pt-4 md:grid-cols-4 lg:grid-cols-9">
+                <Stat label="Primary cache" value={run.primarySkippedAlreadyExcluded} />
+                <Stat label="Fallback cache" value={run.expandedSkippedAlreadyExcluded} />
+                <Stat label="Primary low Elo" value={run.primarySkippedLowRating} />
+                <Stat label="Fallback low Elo" value={run.expandedSkippedLowRating} />
+                <Stat label="Primary offset" value={run.primaryStartPlayerOffset} />
+                <Stat label="Fallback offset" value={run.expandedStartPlayerOffset} />
+                <Stat label="Primary next" value={run.primaryNextPlayerOffset} />
+                <Stat label="Fallback next" value={run.expandedNextPlayerOffset} />
+                <Stat label="Fallback batches" value={run.expandedPlayerBatchesChecked} />
               </dl>
 
               {run.selectedGameIds.length ? (

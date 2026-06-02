@@ -10,8 +10,40 @@ type AutocompletePlayer = {
   rank_level?: string | null;
 };
 
+const AUTOCOMPLETE_CACHE_PREFIX = "aoe4scanner:player-autocomplete:";
+const AUTOCOMPLETE_CACHE_TTL_MS = 60 * 60 * 1000;
+const autocompleteMemoryCache = new Map<string, { storedAt: number; players: AutocompletePlayer[] }>();
+
 function rankLabel(value?: string | null) {
   return value ? value.replaceAll("_", " ") : "Unranked";
+}
+
+function readCachedPlayers(query: string) {
+  const key = query.toLowerCase();
+  const memory = autocompleteMemoryCache.get(key);
+  if (memory && Date.now() - memory.storedAt < AUTOCOMPLETE_CACHE_TTL_MS) return memory.players;
+
+  try {
+    const cached = localStorage.getItem(`${AUTOCOMPLETE_CACHE_PREFIX}${key}`);
+    if (!cached) return null;
+    const parsed = JSON.parse(cached) as { storedAt: number; players: AutocompletePlayer[] };
+    if (Date.now() - parsed.storedAt >= AUTOCOMPLETE_CACHE_TTL_MS) return null;
+    autocompleteMemoryCache.set(key, parsed);
+    return parsed.players;
+  } catch {
+    return null;
+  }
+}
+
+function writeCachedPlayers(query: string, players: AutocompletePlayer[]) {
+  const key = query.toLowerCase();
+  const entry = { storedAt: Date.now(), players };
+  autocompleteMemoryCache.set(key, entry);
+  try {
+    localStorage.setItem(`${AUTOCOMPLETE_CACHE_PREFIX}${key}`, JSON.stringify(entry));
+  } catch {
+    // Cache writes are best-effort.
+  }
 }
 
 export function PlayerAutocompleteInput({ defaultValue }: { defaultValue?: string }) {
@@ -45,6 +77,13 @@ export function PlayerAutocompleteInput({ defaultValue }: { defaultValue?: strin
       return;
     }
 
+    const cachedPlayers = readCachedPlayers(query);
+    if (cachedPlayers) {
+      setPlayers(cachedPlayers);
+      setOpen(true);
+      return;
+    }
+
     const controller = new AbortController();
     const timeout = window.setTimeout(async () => {
       try {
@@ -54,7 +93,9 @@ export function PlayerAutocompleteInput({ defaultValue }: { defaultValue?: strin
         );
         if (!response.ok) return;
         const payload = (await response.json()) as { players?: AutocompletePlayer[] };
-        setPlayers(payload.players ?? []);
+        const nextPlayers = payload.players ?? [];
+        writeCachedPlayers(query, nextPlayers);
+        setPlayers(nextPlayers);
         setOpen(true);
       } catch (error) {
         if ((error as Error).name !== "AbortError") setPlayers([]);
