@@ -280,9 +280,9 @@ function isEliteGame(game: AoeGame, minimumMmr = ELITE_MMR) {
 function eliteBaselineWeight(game: AoeGame) {
   const minimumMmr = minimumPlayerMmr(game);
   if (minimumMmr == null) return 0;
-  if (minimumMmr >= 2200) return 32;
-  if (minimumMmr >= 2100) return 24;
-  if (minimumMmr >= 2000) return 16;
+  if (minimumMmr >= 2200) return 48;
+  if (minimumMmr >= 2100) return 40;
+  if (minimumMmr >= 2000) return MIN_SCORE;
   return 0;
 }
 
@@ -299,7 +299,7 @@ function scoreGame(game: AoeGame, civStats: Map<string, CivStat>) {
   if (winner && loser) {
     const winnerMmr = winner.mmr;
     const loserMmr = loser.mmr;
-    if (winnerMmr != null && loserMmr != null && winnerMmr - loserMmr >= 150) {
+    if (!isEliteGame(game) && winnerMmr != null && loserMmr != null && winnerMmr - loserMmr >= 150) {
       return { score: 0, reasons, tags: [] };
     }
   }
