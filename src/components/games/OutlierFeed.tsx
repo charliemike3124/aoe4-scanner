@@ -12,6 +12,7 @@ import {
 } from 'firebase/firestore';
 import { GameCard } from '@/components/games/GameCard';
 import { EmptyState } from '@/components/games/EmptyState';
+import { LoadingState } from '@/components/games/LoadingState';
 import { ScrollToTopButton } from '@/components/ScrollToTopButton';
 import { db } from '@/lib/firebase';
 import { outlierFromSnapshot, statusFromData } from '@/lib/firestoreConverters';
@@ -409,7 +410,12 @@ export function OutlierFeed({
         : 'No matching games';
 
   if (loading) {
-    return <EmptyState title='Loading outliers' description='Fetching the latest saved games.' />;
+    return (
+      <LoadingState
+        count={mode === 'latest' ? pageSize ?? 15 : ARCHIVE_PAGE_SIZE}
+        showHighlights={showHighlights}
+      />
+    );
   }
 
   if (error) {

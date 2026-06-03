@@ -8,8 +8,9 @@ import { PlayerAutocompleteInput } from "@/components/games/PlayerAutocompleteIn
 import { buttonClassName } from "@/components/ui/button";
 import { db } from "@/lib/firebase";
 
-const MAP_POOL_CACHE_KEY = "aoe4scanner:map-pool";
+const MAP_POOL_CACHE_KEY = "aoe4scanner:map-pool:16.1.10056";
 const MAP_POOL_CACHE_TTL_MS = 24 * 60 * 60 * 1000;
+const STATIC_MAP_POOL = [...CURRENT_RM_SOLO_MAPS];
 
 function readCachedMapPool() {
   try {
@@ -32,7 +33,7 @@ export function ArchiveFilters({
   onApply: (formData: FormData) => void;
   onReset?: () => void;
 }) {
-  const [maps, setMaps] = useState<string[]>([...CURRENT_RM_SOLO_MAPS]);
+  const [maps, setMaps] = useState<string[]>(STATIC_MAP_POOL);
 
   useEffect(() => {
     const cached = readCachedMapPool();
@@ -47,9 +48,10 @@ export function ArchiveFilters({
               .map((entry) => (entry && typeof entry === "object" && "map" in entry ? (entry as { map?: unknown }).map : entry))
               .filter((map): map is string => typeof map === "string" && map.length > 0)
           : [];
-        if (!cancelled && remoteMaps.length) {
-          setMaps(remoteMaps);
-          localStorage.setItem(MAP_POOL_CACHE_KEY, JSON.stringify({ storedAt: Date.now(), maps: remoteMaps }));
+        const nextMaps = remoteMaps.length >= STATIC_MAP_POOL.length ? remoteMaps : STATIC_MAP_POOL;
+        if (!cancelled && nextMaps.length) {
+          setMaps(nextMaps);
+          localStorage.setItem(MAP_POOL_CACHE_KEY, JSON.stringify({ storedAt: Date.now(), maps: nextMaps }));
         }
       } catch {
         // Static maps remain available as fallback.

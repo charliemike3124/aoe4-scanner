@@ -34,7 +34,15 @@ export function CivilizationSelect({ defaultValue }: { defaultValue?: string }) 
         className="flex h-10 w-full items-center justify-between gap-2 rounded-md border border-white/10 bg-slate-900 px-3 text-left text-white outline-none transition hover:border-white/20"
       >
         <span className="flex min-w-0 items-center gap-2">
-          {selected ? <img src={CIVILIZATION_FLAGS[selected]} alt="" className="h-5 w-5 rounded-full object-cover" /> : null}
+          {selected ? (
+            <img
+              src={CIVILIZATION_FLAGS[selected]}
+              alt=""
+              width={20}
+              height={20}
+              className="h-5 w-5 rounded-full object-cover"
+            />
+          ) : null}
           <span className={cn("truncate", !selected && "text-slate-400")}>
             {selected ? formatCivilization(selected) : "Any civilization"}
           </span>
@@ -64,7 +72,13 @@ export function CivilizationSelect({ defaultValue }: { defaultValue?: string }) 
               }}
               className="flex w-full items-center gap-2 rounded px-2 py-2 text-left text-sm text-slate-200 hover:bg-white/10"
             >
-              <img src={CIVILIZATION_FLAGS[civ]} alt="" className="h-5 w-5 rounded-full object-cover" />
+              <img
+                src={CIVILIZATION_FLAGS[civ]}
+                alt=""
+                width={20}
+                height={20}
+                className="h-5 w-5 rounded-full object-cover"
+              />
               <span className="truncate">{formatCivilization(civ)}</span>
             </button>
           ))}
