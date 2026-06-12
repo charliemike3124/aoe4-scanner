@@ -295,8 +295,10 @@ export function OutlierFeed({
         }
 
         const fetchLimit = mode === 'latest' ? pageSize ?? 15 : 250;
-        const fallbackGamesQuery = query(collection(db, 'outlierGames'), orderBy('selectedAt', 'desc'), limit(fetchLimit));
-        const archiveSnapshotPromise = getDoc(doc(db, 'meta', 'archiveSnapshot')).catch(() => null);
+        const gamesQuery = query(collection(db, 'outlierGames'), orderBy('selectedAt', 'desc'), limit(fetchLimit));
+        const archiveSnapshotPromise = mode === 'archive'
+          ? getDoc(doc(db, 'meta', 'archiveSnapshot')).catch(() => null)
+          : Promise.resolve(null);
         const highlightPromise = showHighlights
           ? getDoc(doc(db, 'meta', 'homepageHighlights')).catch(() => null)
           : Promise.resolve(null);
@@ -311,7 +313,7 @@ export function OutlierFeed({
             ? (archiveSnapshot.data().games as unknown[]).map((game) => hydrateGame(game as Record<string, unknown>))
             : [];
         if (!nextGames.length) {
-          const snapshot = await getDocs(fallbackGamesQuery);
+          const snapshot = await getDocs(gamesQuery);
           if (cancelled) return;
           nextGames = snapshot.docs.map((gameDoc) => outlierFromSnapshot(gameDoc));
         }

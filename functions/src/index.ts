@@ -38,6 +38,7 @@ const CANDIDATE_LOOKBACK_HOURS = 12;
 const IGNORED_GAME_TTL_HOURS = 24;
 const PRIMARY_LOOKBACK_HOURS = 6;
 const ARCHIVE_SNAPSHOT_LIMIT = 200;
+const PUBLIC_META_QUERY_LIMIT = 250;
 
 type AnyRecord = Record<string, unknown>;
 
@@ -1465,9 +1466,11 @@ function storedOutlierFromData(id: string, data: AnyRecord): StoredOutlierGame {
 }
 
 async function updateHomepageHighlights() {
-  const snapshot = await OUTLIER_COLLECTION.where("expiresAt", ">=", Timestamp.fromDate(new Date())).limit(250).get();
+  const now = new Date();
+  const snapshot = await OUTLIER_COLLECTION.orderBy("selectedAt", "desc").limit(PUBLIC_META_QUERY_LIMIT).get();
   const games = snapshot.docs
     .map((doc) => storedOutlierFromData(doc.id, record(doc.data())))
+    .filter((game) => game.expiresAt >= now)
     .sort((a, b) => b.selectedAt.getTime() - a.selectedAt.getTime());
   const highlights = selectHomepageHighlights(games);
   await HOMEPAGE_HIGHLIGHTS_DOC.set(
@@ -1481,9 +1484,11 @@ async function updateHomepageHighlights() {
 }
 
 async function updateArchiveSnapshot() {
-  const snapshot = await OUTLIER_COLLECTION.where("expiresAt", ">=", Timestamp.fromDate(new Date())).limit(ARCHIVE_SNAPSHOT_LIMIT).get();
+  const now = new Date();
+  const snapshot = await OUTLIER_COLLECTION.orderBy("selectedAt", "desc").limit(PUBLIC_META_QUERY_LIMIT).get();
   const games = snapshot.docs
     .map((doc) => storedOutlierFromData(doc.id, record(doc.data())))
+    .filter((game) => game.expiresAt >= now)
     .sort((a, b) => b.selectedAt.getTime() - a.selectedAt.getTime())
     .slice(0, ARCHIVE_SNAPSHOT_LIMIT)
     .map(serializeStoredOutlierGame);
