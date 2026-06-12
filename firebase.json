@@ -55,6 +55,13 @@
         }
       },
       {
+        "source": "/refreshAgeupStatsNow",
+        "function": {
+          "functionId": "refreshAgeupStatsNow",
+          "region": "us-central1"
+        }
+      },
+      {
         "source": "**",
         "destination": "/index.html"
       }

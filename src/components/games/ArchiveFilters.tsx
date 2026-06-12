@@ -11,6 +11,16 @@ import { db } from "@/lib/firebase";
 const MAP_POOL_CACHE_KEY = "aoe4scanner:map-pool:16.1.10056";
 const MAP_POOL_CACHE_TTL_MS = 24 * 60 * 60 * 1000;
 const STATIC_MAP_POOL = [...CURRENT_RM_SOLO_MAPS];
+const STRATEGY_OPTIONS = [
+  { label: "Fast Castle", value: "summary_fast_castle" },
+  { label: "Fast Imperial", value: "summary_fast_imperial" },
+  { label: "Feudal rams", value: "strategy_feudal_rams" },
+  { label: "Multi-TC", value: "summary_multi_tc" },
+  { label: "Dark age pressure", value: "summary_dark_age_aggression" },
+  { label: "Dark age tower", value: "strategy_dark_age_tower_rush" },
+  { label: "Rare landmarks", value: "summary_rare_landmark_path" },
+  { label: "Late military", value: "summary_delayed_military" },
+];
 
 function readCachedMapPool() {
   try {
@@ -126,7 +136,7 @@ export function ArchiveFilters({
           />
         </label>
       </div>
-      <div className="mt-4 grid gap-3 md:grid-cols-3">
+      <div className="mt-4 grid gap-3 md:grid-cols-4">
         <label className="space-y-1 text-sm text-slate-300">
           <span>Order by</span>
           <select name="sort" defaultValue={filters.sort ?? "newest"} className="h-10 w-full rounded-md border border-white/10 bg-slate-900 px-3 py-2 text-white outline-none">
@@ -159,6 +169,17 @@ export function ArchiveFilters({
             placeholder="Any"
             className="h-10 w-full rounded-md border border-white/10 bg-slate-900 px-3 py-2 text-white outline-none"
           />
+        </label>
+        <label className="space-y-1 text-sm text-slate-300">
+          <span>Strategy</span>
+          <select name="strategy" defaultValue={filters.strategy ?? ""} className="h-10 w-full rounded-md border border-white/10 bg-slate-900 px-3 py-2 text-white outline-none">
+            <option value="">Any strategy</option>
+            {STRATEGY_OPTIONS.map((option) => (
+              <option key={option.value} value={option.value}>
+                {option.label}
+              </option>
+            ))}
+          </select>
         </label>
       </div>
       <div className="mt-4 flex flex-wrap gap-4">

@@ -72,6 +72,8 @@ The Firebase web app config in `src/lib/firebase.ts` is client-side Firebase con
 
 ## Manual Operations
 
+All manual operation endpoints require `MANUAL_SCAN_SECRET` to be configured in the function environment and passed as `?secret=<MANUAL_SCAN_SECRET>`. Requests without a matching secret are rejected.
+
 Manual scan:
 
 ```text
@@ -94,6 +96,12 @@ Apply rescore cleanup:
 
 ```text
 https://<your-host>/rescoreSavedOutliersNow?secret=<MANUAL_SCAN_SECRET>&dryRun=false
+```
+
+Refresh cached landmark analytics:
+
+```text
+https://<your-host>/refreshAgeupStatsNow?secret=<MANUAL_SCAN_SECRET>
 ```
 
 ## Public Repo Notes

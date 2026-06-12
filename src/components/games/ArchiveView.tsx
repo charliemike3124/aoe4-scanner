@@ -7,7 +7,7 @@ import { ArchiveFilters } from "@/components/games/ArchiveFilters";
 import { OutlierFeed } from "@/components/games/OutlierFeed";
 
 const ARCHIVE_FILTERS_KEY = "aoe4scanner:archive-filters";
-const FILTER_KEYS = ["q", "civilization", "map", "minElo", "maxElo", "minScore", "maxScore", "sort", "latest48h", "bookmarkedOnly", "upsetsOnly"];
+const FILTER_KEYS = ["q", "civilization", "map", "minElo", "maxElo", "minScore", "maxScore", "strategy", "sort", "latest48h", "bookmarkedOnly", "upsetsOnly"];
 
 function readSavedFilters() {
   try {
@@ -38,6 +38,7 @@ export function ArchiveView() {
     maxElo: searchParams.get("maxElo") ?? undefined,
     minScore: searchParams.get("minScore") ?? undefined,
     maxScore: searchParams.get("maxScore") ?? undefined,
+    strategy: searchParams.get("strategy") ?? undefined,
     sort: searchParams.get("sort") ?? undefined,
     latest48h: searchParams.get("latest48h") ?? undefined,
     bookmarkedOnly: searchParams.get("bookmarkedOnly") ?? undefined,
@@ -81,6 +82,7 @@ export function ArchiveView() {
           maxElo,
           minScore: activeFilters.minScore ? Number(activeFilters.minScore) : undefined,
           maxScore: activeFilters.maxScore ? Number(activeFilters.maxScore) : undefined,
+          strategy: activeFilters.strategy,
           sort: activeFilters.sort === "score" ? "score" : "newest",
           latest48h: activeFilters.latest48h === "true",
           bookmarkedOnly: activeFilters.bookmarkedOnly === "true",

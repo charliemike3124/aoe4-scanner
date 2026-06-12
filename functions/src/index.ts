@@ -13,9 +13,9 @@ const TRACKED_PLAYERS_DOC = db.collection("meta").doc("trackedPlayers");
 const SCAN_STATE_DOC = db.collection("meta").doc("scanState");
 const SCAN_LOCK_DOC = db.collection("meta").doc("scanLock");
 const PUBLIC_STATUS_DOC = db.collection("meta").doc("publicStatus");
-const HOMEPAGE_HIGHLIGHTS_DOC = db.collection("meta").doc("homepageHighlights");
 const ARCHIVE_SNAPSHOT_DOC = db.collection("meta").doc("archiveSnapshot");
 const MAP_POOL_DOC = db.collection("meta").doc("mapPool");
+const AGEUP_STATS_DOC = db.collection("meta").doc("ageupStats");
 const OUTLIER_COLLECTION = db.collection("outlierGames");
 const IGNORED_COLLECTION = db.collection("ignoredGames");
 const MIN_RATING = 1700;
@@ -39,6 +39,7 @@ const IGNORED_GAME_TTL_HOURS = 24;
 const PRIMARY_LOOKBACK_HOURS = 6;
 const ARCHIVE_SNAPSHOT_LIMIT = 200;
 const PUBLIC_META_QUERY_LIMIT = 250;
+const AGEUP_STATS_MAX_AGE_DAYS = 10;
 
 type AnyRecord = Record<string, unknown>;
 
@@ -85,6 +86,15 @@ type MatchupStat = {
   gamesCount: number;
 };
 
+type AgeupStat = {
+  civilization: string;
+  path: number[];
+  playerGamesCount: number;
+  winRate: number;
+  pickRate: number;
+  label: string;
+};
+
 type Reason = {
   type: string;
   label: string;
@@ -127,6 +137,10 @@ type MapPoolMap = {
 const SCALING_CIVS = new Set(["abbasid_dynasty", "chinese", "byzantines", "zhu_xis_legacy", "jin_dynasty"]);
 const TEMPO_CIVS = new Set(["french", "mongols", "english", "jeanne_darc", "ottomans"]);
 const mapCivStatCache = new Map<string, CivStat | null>();
+
+function normalizeCivilizationKey(value: string | null) {
+  return value?.toLowerCase().replace(/[^a-z0-9]+/g, "_").replace(/^_+|_+$/g, "") ?? null;
+}
 
 function sleep(ms: number) {
   return new Promise((resolve) => setTimeout(resolve, ms));
@@ -457,30 +471,6 @@ function selectDiverseCandidates(candidates: ScoredCandidate[], count: number) {
   return selected;
 }
 
-function storedWinnerAndLoser(game: Pick<StoredOutlierGame, "players">) {
-  return {
-    winner: game.players.find((player) => player.result?.toLowerCase() === "win"),
-    loser: game.players.find((player) => player.result?.toLowerCase() === "loss"),
-  };
-}
-
-function storedUnderdogMmrDiff(game: Pick<StoredOutlierGame, "players">) {
-  const { winner, loser } = storedWinnerAndLoser(game);
-  if (winner?.mmr == null || loser?.mmr == null || winner.mmr >= loser.mmr) return 0;
-  return loser.mmr - winner.mmr;
-}
-
-function isStoredEliteGame(game: Pick<StoredOutlierGame, "players">) {
-  const mmrs = game.players.map((player) => player.mmr);
-  return mmrs.length >= 2 && mmrs.every((mmr) => mmr != null && mmr >= ELITE_MMR);
-}
-
-function topStoredBy(games: StoredOutlierGame[], score: (game: StoredOutlierGame) => number, count = 3) {
-  return [...games]
-    .sort((a, b) => score(b) - score(a) || b.score - a.score || b.selectedAt.getTime() - a.selectedAt.getTime())
-    .slice(0, count);
-}
-
 function serializeStoredOutlierGame(game: StoredOutlierGame) {
   return {
     ...game,
@@ -489,22 +479,6 @@ function serializeStoredOutlierGame(game: StoredOutlierGame) {
     selectedAt: Timestamp.fromDate(game.selectedAt),
     expiresAt: Timestamp.fromDate(game.expiresAt),
   };
-}
-
-function selectHomepageHighlights(games: StoredOutlierGame[]) {
-  const highlights: Array<{ label: string; game: ReturnType<typeof serializeStoredOutlierGame> }> = [];
-
-  function addMany(label: string, nextGames: StoredOutlierGame[]) {
-    for (const game of nextGames) {
-      highlights.push({ label, game: serializeStoredOutlierGame(game) });
-    }
-  }
-
-  addMany("Top 3 highest scores", topStoredBy(games.filter((game) => game.score >= 100), (game) => game.score));
-  addMany("Top 3 pro matches", topStoredBy(games.filter((game) => isStoredEliteGame(game)), (game) => game.score));
-  addMany("Top 3 biggest upsets", topStoredBy(games.filter((game) => storedUnderdogMmrDiff(game) >= 150), storedUnderdogMmrDiff));
-
-  return highlights;
 }
 
 async function findUnsavedCandidates<T extends { game: AoeGame }>(candidates: T[], count: number) {
@@ -624,6 +598,19 @@ function firstMilitaryProductionTime(player: AnyRecord) {
   return first;
 }
 
+function productionTimes(player: AnyRecord, type: string, patterns: string[]) {
+  const times: number[] = [];
+  for (const raw of arrayValue(player.buildOrder)) {
+    const entry = record(raw);
+    if (stringValue(entry.type) !== type) continue;
+    const icon = stringValue(entry.icon) ?? "";
+    if (!patterns.some((pattern) => icon.includes(pattern))) continue;
+    times.push(...numberArray(entry.finished).filter((time) => time > 0));
+    times.push(...numberArray(entry.constructed).filter((time) => time > 0));
+  }
+  return [...new Set(times)].sort((a, b) => a - b);
+}
+
 function countDestroyedBuildings(player: AnyRecord, patterns: string[]) {
   let count = 0;
   for (const raw of arrayValue(player.buildOrder)) {
@@ -637,18 +624,61 @@ function countDestroyedBuildings(player: AnyRecord, patterns: string[]) {
 }
 
 function constructedBuildingTimes(player: AnyRecord, patterns: string[]) {
-  const times: number[] = [];
-  for (const raw of arrayValue(player.buildOrder)) {
-    const entry = record(raw);
-    if (stringValue(entry.type) !== "Building") continue;
-    const icon = stringValue(entry.icon) ?? "";
-    if (!patterns.some((pattern) => icon.includes(pattern))) continue;
-    times.push(...numberArray(entry.finished).filter((time) => time > 0));
-  }
-  return times.sort((a, b) => a - b);
+  return productionTimes(player, "Building", patterns);
 }
 
-function analyzeSummary(candidate: ScoredCandidate, summary: unknown) {
+function winnerAgeupPath(winnerSummary: AnyRecord) {
+  return arrayValue(record(winnerSummary.analysis).landmarks)
+    .map(record)
+    .map((landmark) => ({
+      pbgid: intValue(landmark.pbgid),
+      name: stringValue(landmark.name),
+      newAge: intValue(landmark.newAge, landmark.new_age),
+    }))
+    .filter((landmark): landmark is { pbgid: number; name: string; newAge: number } => (
+      landmark.pbgid != null && landmark.name != null && landmark.newAge != null && landmark.newAge >= 2
+    ))
+    .sort((a, b) => a.newAge - b.newAge);
+}
+
+function ageupPathKey(civilization: string, path: number[]) {
+  return `${civilization}|${path.join(">")}`;
+}
+
+function scoreRareAgeupPath(candidate: ScoredCandidate, winnerSummary: AnyRecord, ageupStats: Map<string, AgeupStat>) {
+  const civilization = normalizeCivilizationKey(stringValue(winnerSummary.civilization));
+  if (!civilization) return;
+
+  const ageups = winnerAgeupPath(winnerSummary);
+  let best: AgeupStat | null = null;
+  for (let index = 0; index < ageups.length; index += 1) {
+    const path = ageups.slice(0, index + 1).map((ageup) => ageup.pbgid);
+    const stat = ageupStats.get(ageupPathKey(civilization, path));
+    if (!stat) continue;
+    if (!best || stat.pickRate < best.pickRate) best = stat;
+  }
+  if (!best) return;
+
+  let weight = 0;
+  if (best.pickRate <= 3) weight = 38;
+  else if (best.pickRate <= 6) weight = 30;
+  else if (best.pickRate <= 10) weight = 24;
+  else if (best.pickRate <= 15) weight = 18;
+  else if (best.pickRate <= 20) weight = 12;
+  if (!weight) return;
+
+  if (best.winRate < 48) weight += 6;
+  const pickRate = best.pickRate.toFixed(best.pickRate < 10 ? 1 : 0);
+  addSummaryReason(
+    candidate,
+    "summary_rare_landmark_path",
+    `Game summary: winner used rare landmark path ${best.label} (${pickRate}% pick rate, ${best.winRate.toFixed(1)}% win rate)`,
+    weight,
+    "Rare landmarks",
+  );
+}
+
+function analyzeSummary(candidate: ScoredCandidate, summary: unknown, ageupStats = new Map<string, AgeupStat>()) {
   const payload = record(summary);
   const players = arrayValue(payload.players).map(record);
   const winner = candidate.game.players.find((player) => player.result === "win");
@@ -664,12 +694,14 @@ function analyzeSummary(candidate: ScoredCandidate, summary: unknown) {
       players.find((player) => stringValue(player.name) === loser.name));
   if (!winnerSummary) return;
 
+  if (ageupStats.size) scoreRareAgeupPath(candidate, winnerSummary, ageupStats);
+
   const castleTime = actionTime(winnerSummary, "castleAge");
   if (castleTime != null && castleTime <= 660 && (candidate.game.durationSeconds ?? 0) >= 20 * 60) {
     addSummaryReason(candidate, "summary_fast_castle", `Game summary: fast Castle Age at ${Math.floor(castleTime / 60)}:${String(castleTime % 60).padStart(2, "0")}`, 6, "Fast Castle");
   }
   const imperialTime = actionTime(winnerSummary, "imperialAge");
-  if (imperialTime != null && imperialTime <= 1500 && (candidate.game.durationSeconds ?? 0) >= 25 * 60) {
+  if (imperialTime != null && imperialTime < 20 * 60) {
     addSummaryReason(candidate, "summary_fast_imperial", `Game summary: fast Imperial Age at ${Math.floor(imperialTime / 60)}:${String(imperialTime % 60).padStart(2, "0")}`, 10, "Fast Imperial");
   }
   const feudalTime = actionTime(winnerSummary, "feudalAge");
@@ -677,10 +709,24 @@ function analyzeSummary(candidate: ScoredCandidate, summary: unknown) {
     addSummaryReason(candidate, "summary_late_feudal", `Game summary: delayed Feudal Age at ${Math.floor(feudalTime / 60)}:${String(feudalTime % 60).padStart(2, "0")}`, 8, "Odd timing");
   }
   const firstMilitary = firstMilitaryProductionTime(winnerSummary);
-  if (firstMilitary != null && firstMilitary <= 180) {
-    addSummaryReason(candidate, "summary_dark_age_aggression", `Game summary: military unit produced before 3 minutes`, 12, "Dark age pressure");
+  const darkAgeSpearman = productionTimes(winnerSummary, "Unit", ["spearman"]).find((time) => time < (feudalTime ?? 5 * 60));
+  if (darkAgeSpearman != null) {
+    addSummaryReason(candidate, "summary_dark_age_aggression", `Game summary: Dark Age spearman pressure at ${Math.floor(darkAgeSpearman / 60)}:${String(darkAgeSpearman % 60).padStart(2, "0")}`, 12, "Dark age pressure");
+  } else if (firstMilitary != null && firstMilitary <= 180) {
+    addSummaryReason(candidate, "summary_dark_age_aggression", "Game summary: military unit produced before 3 minutes", 12, "Dark age pressure");
   } else if (firstMilitary != null && firstMilitary >= 600 && (candidate.game.durationSeconds ?? 0) >= 18 * 60) {
     addSummaryReason(candidate, "summary_delayed_military", `Game summary: first military unit after 10 minutes`, 12, "Odd build");
+  }
+
+  const ramTimes = productionTimes(winnerSummary, "Unit", ["/ram", "units/ram"]);
+  const firstFeudalRam = ramTimes.find((time) => time >= (feudalTime ?? 0) && time < (castleTime ?? 16 * 60));
+  if (firstFeudalRam != null) {
+    addSummaryReason(candidate, "strategy_feudal_rams", `Game summary: Feudal Age ram pressure started at ${Math.floor(firstFeudalRam / 60)}:${String(firstFeudalRam % 60).padStart(2, "0")}`, 8, "Feudal rams");
+  }
+
+  const darkAgeTower = productionTimes(winnerSummary, "Building", ["outpost", "watch_tower", "tower"]).find((time) => time < (feudalTime ?? 5 * 60));
+  if (darkAgeTower != null) {
+    addSummaryReason(candidate, "strategy_dark_age_tower_rush", `Game summary: Dark Age tower pressure started at ${Math.floor(darkAgeTower / 60)}:${String(darkAgeTower % 60).padStart(2, "0")}`, 8, "Dark age tower");
   }
 
   const extraTownCenterTimes = constructedBuildingTimes(winnerSummary, [
@@ -690,11 +736,11 @@ function analyzeSummary(candidate: ScoredCandidate, summary: unknown) {
     "town_centre_capital",
   ]);
   if (extraTownCenterTimes.length >= 2) {
-    const secondTcTime = extraTownCenterTimes[1];
+    const firstExtraTcTime = extraTownCenterTimes[0];
     addSummaryReason(
       candidate,
       "summary_multi_tc",
-      `Game summary: winner went multiple Town Centers, second TC completed at ${Math.floor(secondTcTime / 60)}:${String(secondTcTime % 60).padStart(2, "0")}`,
+      `Game summary: winner went ${extraTownCenterTimes.length + 1} Town Centers, second TC started at ${Math.floor(firstExtraTcTime / 60)}:${String(firstExtraTcTime % 60).padStart(2, "0")}`,
       8,
       "Multi-TC",
     );
@@ -869,14 +915,19 @@ function addContextualMatchupReason(candidate: ScoredCandidate, matchupStats: Ma
   }
 }
 
-async function enrichFinalistsWithSummaries(candidates: ScoredCandidate[], matchupStats: Map<string, MatchupStat>, eliteMatchupStats = matchupStats) {
+async function enrichFinalistsWithSummaries(
+  candidates: ScoredCandidate[],
+  matchupStats: Map<string, MatchupStat>,
+  eliteMatchupStats = matchupStats,
+  ageupStats = new Map<string, AgeupStat>(),
+) {
   const finalists: ScoredCandidate[] = candidates;
   for (const candidate of finalists) {
     const summaryResult = await fetchGameSummary(candidate.game);
     candidate.summaryAvailable = Boolean(summaryResult);
     candidate.summaryUrl = summaryResult?.summaryUrl ?? null;
     if (summaryResult) {
-      analyzeSummary(candidate, summaryResult.summary);
+      analyzeSummary(candidate, summaryResult.summary, ageupStats);
       const payload = record(summaryResult.summary);
       const mapId = candidate.game.mapId ?? intValue(payload.mapId, payload.map_id);
       const winner = candidate.game.players.find((player) => player.result === "win");
@@ -903,18 +954,30 @@ async function enrichFinalistsWithSummaries(candidates: ScoredCandidate[], match
   return finalists.sort((a, b) => b.score - a.score || b.game.startedAt.getTime() - a.game.startedAt.getTime());
 }
 
-async function enrichCandidateWithSummary(candidate: ScoredCandidate, matchupStats: Map<string, MatchupStat>, eliteMatchupStats = matchupStats) {
-  const enriched = await enrichFinalistsWithSummaries([candidate], matchupStats, eliteMatchupStats);
+async function enrichCandidateWithSummary(
+  candidate: ScoredCandidate,
+  matchupStats: Map<string, MatchupStat>,
+  eliteMatchupStats = matchupStats,
+  ageupStats = new Map<string, AgeupStat>(),
+) {
+  const enriched = await enrichFinalistsWithSummaries([candidate], matchupStats, eliteMatchupStats, ageupStats);
   return enriched[0] ?? candidate;
 }
 
-async function selectOutlierCandidates(games: AoeGame[], civStats: Map<string, CivStat>, eliteCivStats: Map<string, CivStat>, matchupStats: Map<string, MatchupStat>, eliteMatchupStats: Map<string, MatchupStat>) {
+async function selectOutlierCandidates(
+  games: AoeGame[],
+  civStats: Map<string, CivStat>,
+  eliteCivStats: Map<string, CivStat>,
+  matchupStats: Map<string, MatchupStat>,
+  eliteMatchupStats: Map<string, MatchupStat>,
+  ageupStats: Map<string, AgeupStat>,
+) {
   const baseCandidates = scoreCandidates(games, civStats, eliteCivStats);
   const eliteProbes = eliteSummaryProbeCandidates(games, civStats, eliteCivStats, baseCandidates);
   const unsavedBase = await findUnsavedCandidates(baseCandidates, SUMMARY_FINALIST_COUNT);
   const unsavedEliteProbes = await findUnsavedCandidates(eliteProbes, ELITE_SUMMARY_PROBE_COUNT);
   const finalists = mergeCandidates([...unsavedBase, ...unsavedEliteProbes]);
-  const enrichedFinalists = await enrichFinalistsWithSummaries(finalists, matchupStats, eliteMatchupStats);
+  const enrichedFinalists = await enrichFinalistsWithSummaries(finalists, matchupStats, eliteMatchupStats, ageupStats);
   const qualified = mergeCandidates([...baseCandidates, ...enrichedFinalists]).filter((candidate) => candidate.score >= MIN_SCORE);
   const selected = selectDiverseCandidates(
     qualified.filter((candidate) => finalists.some((finalist) => finalist.game.aoe4worldGameId === candidate.game.aoe4worldGameId)),
@@ -997,6 +1060,120 @@ async function loadMatchupStats(ratingFilter?: string) {
     stats.set(`${civilization}|${otherCivilization}`, stat);
   }
   return stats;
+}
+
+function serializeAgeupStats(stats: Map<string, AgeupStat>) {
+  return Array.from(stats.values()).map((stat) => ({ ...stat, key: ageupPathKey(stat.civilization, stat.path) }));
+}
+
+function hydrateAgeupStats(value: unknown) {
+  const stats = new Map<string, AgeupStat>();
+  for (const raw of arrayValue(value)) {
+    const item = record(raw);
+    const civilization = normalizeCivilizationKey(stringValue(item.civilization));
+    const path = arrayValue(item.path).map((entry) => intValue(entry)).filter((entry): entry is number => entry != null);
+    if (!civilization || !path.length) continue;
+    const stat: AgeupStat = {
+      civilization,
+      path,
+      playerGamesCount: intValue(item.playerGamesCount, item.player_games_count) ?? 0,
+      winRate: numberValue(item.winRate, item.win_rate) ?? 50,
+      pickRate: numberValue(item.pickRate, item.pick_rate) ?? 100,
+      label: stringValue(item.label) ?? path.join(" -> "),
+    };
+    stats.set(ageupPathKey(civilization, path), stat);
+  }
+  return stats;
+}
+
+async function fetchCurrentAgeupStats() {
+  const url = new URL(`${API_BASE}/stats/analytics/ageups`);
+  const payload = await fetchJson<{ data?: Record<string, unknown>; filter?: unknown; notice?: unknown }>(url);
+  const data = record(payload.data);
+  const civilizationTotals = new Map<string, number>();
+  for (const raw of arrayValue(data.age1)) {
+    const item = record(raw);
+    const civilization = normalizeCivilizationKey(stringValue(item.civilization));
+    const games = intValue(item.player_games_count, item.playerGamesCount);
+    if (civilization && games != null && games > 0) civilizationTotals.set(civilization, games);
+  }
+
+  const stats = new Map<string, AgeupStat>();
+  for (const section of ["age1-2", "age1-3", "age1-4"]) {
+    for (const raw of arrayValue(data[section])) {
+      const item = record(raw);
+      const civilization = normalizeCivilizationKey(stringValue(item.civilization));
+      if (!civilization) continue;
+      const path = [
+        intValue(item.age2_pbgid, item.age2Pbgid),
+        intValue(item.age3_pbgid, item.age3Pbgid),
+        intValue(item.age4_pbgid, item.age4Pbgid),
+      ].filter((pbgid): pbgid is number => pbgid != null);
+      if (!path.length) continue;
+      const playerGamesCount = intValue(item.player_games_count, item.playerGamesCount) ?? 0;
+      if (playerGamesCount <= 0) continue;
+      const totalGames = civilizationTotals.get(civilization);
+      if (!totalGames) continue;
+      const labels = [
+        stringValue(item.age2_name, item.age2Name),
+        stringValue(item.age3_name, item.age3Name),
+        stringValue(item.age4_name, item.age4Name),
+      ].filter((label): label is string => Boolean(label));
+      const stat: AgeupStat = {
+        civilization,
+        path,
+        playerGamesCount,
+        winRate: numberValue(item.win_rate, item.winRate) ?? 50,
+        pickRate: (playerGamesCount / totalGames) * 100,
+        label: labels.join(" -> "),
+      };
+      stats.set(ageupPathKey(civilization, path), stat);
+    }
+  }
+  return {
+    stats,
+    patch: stringValue(record(payload.filter).patch),
+    notice: stringValue(payload.notice),
+  };
+}
+
+async function updateAgeupStats() {
+  const { stats, patch, notice } = await fetchCurrentAgeupStats();
+  const serialized = serializeAgeupStats(stats);
+  await AGEUP_STATS_DOC.set(
+    {
+      updatedAt: FieldValue.serverTimestamp(),
+      patch,
+      notice,
+      count: serialized.length,
+      stats: serialized,
+    },
+    { merge: true },
+  );
+  return { count: serialized.length, patch };
+}
+
+async function loadAgeupStats() {
+  try {
+    const snapshot = await AGEUP_STATS_DOC.get();
+    if (snapshot.exists) {
+      const data = record(snapshot.data());
+      const updatedAt = storedDate(data.updatedAt);
+      const freshEnough = updatedAt.getTime() > Date.now() - AGEUP_STATS_MAX_AGE_DAYS * 24 * 60 * 60 * 1000;
+      const cached = hydrateAgeupStats(data.stats);
+      if (freshEnough && cached.size) return cached;
+    }
+  } catch (error) {
+    logger.warn("Could not load cached ageup stats", { error });
+  }
+
+  try {
+    const { stats } = await fetchCurrentAgeupStats();
+    return stats;
+  } catch (error) {
+    logger.warn("Could not load live ageup stats", { error });
+    return new Map<string, AgeupStat>();
+  }
 }
 
 async function fetchCurrentMapPool() {
@@ -1127,8 +1304,10 @@ async function pruneExpiredFallback() {
     const batch = db.batch();
     expired.docs.forEach((doc) => batch.delete(doc.ref));
     if (!expired.empty) await batch.commit();
+    return expired.size;
   } catch (error) {
     logger.warn("Expired outlier fallback cleanup skipped", error);
+    return 0;
   }
 }
 
@@ -1190,15 +1369,16 @@ async function runScan(forcePlayers = false, options: { allowDeepFallback?: bool
   await scanRef.set({ status: "running", startedAt: FieldValue.serverTimestamp(), type: "hourly_outlier_scan" });
 
   try {
-    await pruneExpiredFallback();
+    const expiredOutliersPruned = await pruneExpiredFallback();
     const primarySince = new Date(Date.now() - PRIMARY_LOOKBACK_HOURS * 60 * 60 * 1000);
     const expandedSince = new Date(Date.now() - CANDIDATE_LOOKBACK_HOURS * 60 * 60 * 1000);
-    const [profileIds, civStats, eliteCivStats, matchupStats, eliteMatchupStats] = await Promise.all([
+    const [profileIds, civStats, eliteCivStats, matchupStats, eliteMatchupStats, ageupStats] = await Promise.all([
       refreshTrackedPlayersIfNeeded(forcePlayers),
       loadCivStats(),
       loadCivStats(">1700"),
       loadMatchupStats(),
       loadMatchupStats(">1700"),
+      loadAgeupStats(),
     ]);
     const excludedGameIds = await loadExcludedGameIds();
     const scanStateSnapshot = await SCAN_STATE_DOC.get();
@@ -1210,7 +1390,7 @@ async function runScan(forcePlayers = false, options: { allowDeepFallback?: bool
     let games = primaryGames;
     let fetchDiagnostics = primaryFetch.diagnostics;
     let expandedFetchDiagnostics: FetchDiagnostics | null = null;
-    let selection = await selectOutlierCandidates(primaryGames, civStats, eliteCivStats, matchupStats, eliteMatchupStats);
+    let selection = await selectOutlierCandidates(primaryGames, civStats, eliteCivStats, matchupStats, eliteMatchupStats, ageupStats);
     let rejectedCached = await rememberRejectedGames(primaryGames, selection.qualified);
     let lookbackHours = PRIMARY_LOOKBACK_HOURS;
     let expanded = false;
@@ -1221,7 +1401,7 @@ async function runScan(forcePlayers = false, options: { allowDeepFallback?: bool
       games = expandedGames;
       fetchDiagnostics = expandedFetch.diagnostics;
       expandedFetchDiagnostics = expandedFetch.diagnostics;
-      selection = await selectOutlierCandidates(expandedGames, civStats, eliteCivStats, matchupStats, eliteMatchupStats);
+      selection = await selectOutlierCandidates(expandedGames, civStats, eliteCivStats, matchupStats, eliteMatchupStats, ageupStats);
       rejectedCached = await rememberRejectedGames(expandedGames, selection.qualified);
       lookbackHours = CANDIDATE_LOOKBACK_HOURS;
       expanded = true;
@@ -1257,7 +1437,7 @@ async function runScan(forcePlayers = false, options: { allowDeepFallback?: bool
     const totalSkippedInvalid = primaryFetch.diagnostics.skippedInvalid + (expandedFetchDiagnostics?.skippedInvalid ?? 0);
     const totalEligibleGamesCollected =
       primaryFetch.diagnostics.eligibleGamesCollected + (expandedFetchDiagnostics?.eligibleGamesCollected ?? 0);
-    await markFreshPicks(selectedGameIds);
+    if (selectedGameIds.length) await markFreshPicks(selectedGameIds);
     const message = selection.selected.length
       ? `Stored ${selection.selected.length} games: ${selectedGameIds.join(", ")}.`
       : selection.qualified.length
@@ -1335,7 +1515,9 @@ async function runScan(forcePlayers = false, options: { allowDeepFallback?: bool
         { merge: true },
       ),
     ]);
-    const { homepageHighlightCount, archiveSnapshotCount } = await updatePublicMetaSnapshots();
+    const publicSnapshotRefreshed = selectedGameIds.length > 0 || expiredOutliersPruned > 0;
+    const metaSnapshotCounts = publicSnapshotRefreshed ? await updatePublicMetaSnapshots() : null;
+    const archiveSnapshotCount = metaSnapshotCounts?.archiveSnapshotCount ?? null;
 
     return {
       ok: true,
@@ -1392,7 +1574,8 @@ async function runScan(forcePlayers = false, options: { allowDeepFallback?: bool
       primaryPlayerBatchesChecked: primaryFetch.diagnostics.playerBatchesChecked,
       expandedPlayerBatchesChecked: expandedFetchDiagnostics?.playerBatchesChecked ?? 0,
       ignoredGameTtlHours: IGNORED_GAME_TTL_HOURS,
-      homepageHighlightCount,
+      expiredOutliersPruned,
+      publicSnapshotRefreshed,
       archiveSnapshotCount,
     };
   } catch (error) {
@@ -1468,25 +1651,6 @@ function storedOutlierFromData(id: string, data: AnyRecord): StoredOutlierGame {
   };
 }
 
-async function updateHomepageHighlights() {
-  const now = new Date();
-  const snapshot = await OUTLIER_COLLECTION.orderBy("selectedAt", "desc").limit(PUBLIC_META_QUERY_LIMIT).get();
-  const games = snapshot.docs
-    .map((doc) => storedOutlierFromData(doc.id, record(doc.data())))
-    .filter((game) => game.expiresAt >= now)
-    .sort((a, b) => b.selectedAt.getTime() - a.selectedAt.getTime())
-    .slice(0, ARCHIVE_SNAPSHOT_LIMIT);
-  const highlights = selectHomepageHighlights(games);
-  await HOMEPAGE_HIGHLIGHTS_DOC.set(
-    {
-      updatedAt: FieldValue.serverTimestamp(),
-      highlights,
-    },
-    { merge: true },
-  );
-  return highlights.length;
-}
-
 async function updateArchiveSnapshot() {
   const now = new Date();
   const snapshot = await OUTLIER_COLLECTION.orderBy("selectedAt", "desc").limit(PUBLIC_META_QUERY_LIMIT).get();
@@ -1510,19 +1674,17 @@ async function updateArchiveSnapshot() {
 }
 
 async function updatePublicMetaSnapshots() {
-  const [homepageHighlightCount, archiveSnapshotCount] = await Promise.all([
-    updateHomepageHighlights(),
-    updateArchiveSnapshot(),
-  ]);
-  return { homepageHighlightCount, archiveSnapshotCount };
+  const archiveSnapshotCount = await updateArchiveSnapshot();
+  return { archiveSnapshotCount };
 }
 
 async function rescoreSavedOutliers(dryRun = true) {
-  const [civStats, eliteCivStats, matchupStats, eliteMatchupStats, snapshot] = await Promise.all([
+  const [civStats, eliteCivStats, matchupStats, eliteMatchupStats, ageupStats, snapshot] = await Promise.all([
     loadCivStats(),
     loadCivStats(">1700"),
     loadMatchupStats(),
     loadMatchupStats(">1700"),
+    loadAgeupStats(),
     OUTLIER_COLLECTION.where("expiresAt", ">=", Timestamp.fromDate(new Date())).limit(250).get(),
   ]);
 
@@ -1538,7 +1700,7 @@ async function rescoreSavedOutliers(dryRun = true) {
       const game = storedGameFromData(doc.id, data);
       const baseScore = scoreGame(game, civStats, eliteCivStats);
       let candidate: ScoredCandidate = { game, ...baseScore };
-      if (candidate.score >= MIN_SCORE) candidate = await enrichCandidateWithSummary(candidate, matchupStats, eliteMatchupStats);
+      if (candidate.score >= MIN_SCORE) candidate = await enrichCandidateWithSummary(candidate, matchupStats, eliteMatchupStats, ageupStats);
 
       const oldScore = Number(data.score ?? 0);
       if (candidate.score < MIN_SCORE) {
@@ -1593,7 +1755,6 @@ async function rescoreSavedOutliers(dryRun = true) {
     keptCount: kept.length,
     removedCount: removed.length,
     skippedCount: skipped.length,
-    homepageHighlightCount: metaSnapshotCounts?.homepageHighlightCount ?? null,
     archiveSnapshotCount: metaSnapshotCounts?.archiveSnapshotCount ?? null,
     kept,
     removed,
@@ -1615,9 +1776,23 @@ export const scanOutliersEveryThreeHours = onSchedule(
   },
 );
 
+export const refreshAgeupStatsWeekly = onSchedule(
+  {
+    schedule: "15 3 * * 1",
+    timeZone: "Etc/UTC",
+    region: "us-central1",
+    timeoutSeconds: 180,
+    memory: "256MiB",
+  },
+  async () => {
+    const result = await updateAgeupStats();
+    logger.info("Weekly ageup stats refresh complete", result);
+  },
+);
+
 export const scanOutliersNow = onRequest({ region: "us-central1", timeoutSeconds: 540, memory: "512MiB" }, async (request, response) => {
   const secret = process.env.MANUAL_SCAN_SECRET;
-  if (secret && request.query.secret !== secret) {
+  if (!secret || request.query.secret !== secret) {
     response.status(403).json({ ok: false, error: "Forbidden" });
     return;
   }
@@ -1628,9 +1803,19 @@ export const scanOutliersNow = onRequest({ region: "us-central1", timeoutSeconds
   response.json(result);
 });
 
+export const refreshAgeupStatsNow = onRequest({ region: "us-central1", timeoutSeconds: 180, memory: "256MiB" }, async (request, response) => {
+  const secret = process.env.MANUAL_SCAN_SECRET;
+  if (!secret || request.query.secret !== secret) {
+    response.status(403).json({ ok: false, error: "Forbidden" });
+    return;
+  }
+  const result = await updateAgeupStats();
+  response.json({ ok: true, ...result });
+});
+
 export const refreshMapPoolNow = onRequest({ region: "us-central1", timeoutSeconds: 120, memory: "256MiB" }, async (request, response) => {
   const secret = process.env.MANUAL_SCAN_SECRET;
-  if (secret && request.query.secret !== secret) {
+  if (!secret || request.query.secret !== secret) {
     response.status(403).json({ ok: false, error: "Forbidden" });
     return;
   }
@@ -1640,7 +1825,7 @@ export const refreshMapPoolNow = onRequest({ region: "us-central1", timeoutSecon
 
 export const rescoreSavedOutliersNow = onRequest({ region: "us-central1", timeoutSeconds: 540, memory: "512MiB" }, async (request, response) => {
   const secret = process.env.MANUAL_SCAN_SECRET;
-  if (secret && request.query.secret !== secret) {
+  if (!secret || request.query.secret !== secret) {
     response.status(403).json({ ok: false, error: "Forbidden" });
     return;
   }

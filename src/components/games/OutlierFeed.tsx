@@ -28,6 +28,7 @@ type FeedFilters = {
   maxElo?: number;
   minScore?: number;
   maxScore?: number;
+  strategy?: string;
   sort?: 'newest' | 'score';
   latest48h?: boolean;
   bookmarkedOnly?: boolean;
@@ -90,6 +91,7 @@ function matchesClientFilters(game: OutlierGame, filters: FeedFilters, bookmarks
   if (filters.latest48h && game.startedAt.getTime() < Date.now() - 48 * 60 * 60 * 1000) return false;
   if (filters.minScore != null && game.score < filters.minScore) return false;
   if (filters.maxScore != null && game.score > filters.maxScore) return false;
+  if (filters.strategy && !game.reasons.some((reason) => reason.type === filters.strategy)) return false;
   if (filters.upsetsOnly && !game.reasons.some((reason) => reason.type.toLowerCase().includes('upset') || reason.label.toLowerCase().includes('underdog'))) {
     return false;
   }
@@ -215,26 +217,6 @@ function cacheKey(mode: FeedMode, pageSize?: number, showHighlights = false) {
   return `${CACHE_PREFIX}${JSON.stringify({ mode, pageSize, showHighlights })}`;
 }
 
-function highlightFromData(entry: unknown): Highlight | null {
-  if (!entry || typeof entry !== 'object') return null;
-  const data = entry as { label?: unknown; game?: unknown };
-  if (typeof data.label !== 'string' || !data.game || typeof data.game !== 'object') return null;
-  return {
-    label: data.label,
-    game: hydrateGame(data.game as Record<string, unknown>),
-  };
-}
-
-function normalizeHighlightLabels(highlights: Highlight[]) {
-  return highlights.map((highlight) => {
-    const label = highlight.label.replace(/\s+#\d+$/, '');
-    if (label === 'Highest Score') return { ...highlight, label: 'Top 3 highest scores' };
-    if (label === 'Best Pro Match' || label === 'Top Pro Match') return { ...highlight, label: 'Top 3 pro matches' };
-    if (label === 'Biggest Upset') return { ...highlight, label: 'Top 3 biggest upsets' };
-    return { ...highlight, label };
-  });
-}
-
 function PaginationControls({
   currentPage,
   totalPages,
@@ -283,7 +265,6 @@ export function OutlierFeed({
   showHighlights?: boolean;
 }) {
   const [games, setGames] = useState<OutlierGame[]>([]);
-  const [savedHighlights, setSavedHighlights] = useState<Highlight[]>([]);
   const [status, setStatus] = useState<PublicStatus>({});
   const [loading, setLoading] = useState(true);
   const [error, setError] = useState<string | null>(null);
@@ -318,7 +299,6 @@ export function OutlierFeed({
           const parsed = JSON.parse(cached) as {
             storedAt: number;
             games: ReturnType<typeof serializeGame>[];
-            highlights?: Array<{ label: string; game: ReturnType<typeof serializeGame> }>;
             status: {
               lastSuccessfulScanAt?: string | null;
               lastScanMessage?: string | null;
@@ -327,7 +307,6 @@ export function OutlierFeed({
           };
           if (Date.now() - parsed.storedAt < CACHE_TTL_MS) {
             setGames(parsed.games.map(hydrateGame));
-            setSavedHighlights(parsed.highlights?.map((highlight) => ({ label: highlight.label, game: hydrateGame(highlight.game) })) ?? []);
             setStatus({
               ...parsed.status,
               lastSuccessfulScanAt: parsed.status.lastSuccessfulScanAt
@@ -344,13 +323,9 @@ export function OutlierFeed({
         const archiveSnapshotPromise = mode === 'archive' || showHighlights
           ? getDoc(doc(db, 'meta', 'archiveSnapshot')).catch(() => null)
           : Promise.resolve(null);
-        const highlightPromise = showHighlights
-          ? getDoc(doc(db, 'meta', 'homepageHighlights')).catch(() => null)
-          : Promise.resolve(null);
-        const [archiveSnapshot, statusSnapshot, highlightsSnapshot] = await Promise.all([
+        const [archiveSnapshot, statusSnapshot] = await Promise.all([
           archiveSnapshotPromise,
           getDoc(doc(db, 'meta', 'publicStatus')),
-          highlightPromise,
         ]);
         if (cancelled) return;
         let nextGames =
@@ -364,16 +339,11 @@ export function OutlierFeed({
         }
         nextGames = nextGames.sort(newestPickedFirst).slice(0, fetchLimit);
         const nextStatus = statusFromData(statusSnapshot.data());
-        const nextHighlights =
-          highlightsSnapshot?.exists()
-            ? ((highlightsSnapshot.data().highlights ?? []) as unknown[]).map(highlightFromData).filter((highlight): highlight is Highlight => Boolean(highlight))
-            : [];
         localStorage.setItem(
           key,
           JSON.stringify({
             storedAt: Date.now(),
             games: nextGames.map(serializeGame),
-            highlights: nextHighlights.map((highlight) => ({ label: highlight.label, game: serializeGame(highlight.game) })),
             status: {
               ...nextStatus,
               lastSuccessfulScanAt: nextStatus.lastSuccessfulScanAt?.toISOString() ?? null,
@@ -381,7 +351,6 @@ export function OutlierFeed({
           }),
         );
         setGames(nextGames);
-        setSavedHighlights(nextHighlights);
         setStatus(nextStatus);
       } catch (caught) {
         if (!cancelled)
@@ -413,12 +382,8 @@ export function OutlierFeed({
     return visibleGames.slice(start, start + ARCHIVE_PAGE_SIZE);
   }, [currentPage, mode, pageSize, visibleGames]);
   const highlights = useMemo(
-    () => {
-      if (!showHighlights) return [];
-      const currentHighlights = normalizeHighlightLabels(savedHighlights.filter((highlight) => highlight.label !== 'Best Comeback'));
-      return games.length ? selectHighlights(games) : currentHighlights;
-    },
-    [games, savedHighlights, showHighlights],
+    () => (showHighlights ? selectHighlights(games) : []),
+    [games, showHighlights],
   );
 
   useEffect(() => {
