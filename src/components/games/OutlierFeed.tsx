@@ -36,7 +36,7 @@ type FeedFilters = {
 
 const CACHE_TTL_MS = 15 * 60 * 1000;
 const ARCHIVE_PAGE_SIZE = 20;
-const CACHE_PREFIX = 'aoe4scanner:feed-cache:';
+const CACHE_PREFIX = 'aoe4scanner:feed-cache:v2:';
 const BOOKMARKS_KEY = 'aoe4scanner:bookmarks';
 const LAST_SEEN_KEY = 'aoe4scanner:last-seen-selected-at';
 const SPOILER_KEY = 'aoe4scanner:spoiler-light';
@@ -123,15 +123,6 @@ type Highlight = {
   game: OutlierGame;
 };
 
-const COMEBACK_REASON_PATTERNS = [
-  'comeback',
-  'villager_deficit',
-  'resource_deficit',
-  'lost_multiple_landmarks',
-  'won_after_losing_tc',
-  'lost_tc',
-];
-
 function winnerAndLoser(game: OutlierGame) {
   return {
     winner: game.players.find((player) => player.result?.toLowerCase() === 'win'),
@@ -150,33 +141,36 @@ function isEliteSavedGame(game: OutlierGame) {
   return mmrs.length >= 2 && mmrs.every((mmr) => mmr != null && mmr >= 2000);
 }
 
-function hasComebackSignal(game: OutlierGame) {
-  return game.reasons.some((reason) => {
-    const haystack = `${reason.type} ${reason.label}`.toLowerCase();
-    return COMEBACK_REASON_PATTERNS.some((pattern) => haystack.includes(pattern));
-  });
-}
-
-function bestBy(games: OutlierGame[], score: (game: OutlierGame) => number) {
-  return [...games].sort((a, b) => score(b) - score(a) || b.score - a.score || b.selectedAt.getTime() - a.selectedAt.getTime())[0] ?? null;
+function topBy(games: OutlierGame[], score: (game: OutlierGame) => number, count = 3) {
+  return [...games]
+    .sort((a, b) => score(b) - score(a) || b.score - a.score || b.selectedAt.getTime() - a.selectedAt.getTime())
+    .slice(0, count);
 }
 
 function selectHighlights(games: OutlierGame[]) {
-  const selectedIds = new Set<string>();
   const highlights: Highlight[] = [];
 
-  function add(label: string, game: OutlierGame | null) {
-    if (!game || selectedIds.has(game.id)) return;
-    selectedIds.add(game.id);
-    highlights.push({ label, game });
+  function addMany(label: string, nextGames: OutlierGame[]) {
+    for (const game of nextGames) {
+      highlights.push({ label, game });
+    }
   }
 
-  add('Highest Score', bestBy(games.filter((game) => game.score >= 100), (game) => game.score));
-  add('Best Comeback', bestBy(games.filter((game) => !selectedIds.has(game.id) && hasComebackSignal(game)), (game) => game.score));
-  add('Best Pro Match', bestBy(games.filter((game) => !selectedIds.has(game.id) && isEliteSavedGame(game)), (game) => game.score));
-  add('Biggest Upset', bestBy(games.filter((game) => !selectedIds.has(game.id) && underdogMmrDiff(game) >= 150), underdogMmrDiff));
+  addMany('Top 3 highest scores', topBy(games.filter((game) => game.score >= 100), (game) => game.score));
+  addMany('Top 3 pro matches', topBy(games.filter((game) => isEliteSavedGame(game)), (game) => game.score));
+  addMany('Top 3 biggest upsets', topBy(games.filter((game) => underdogMmrDiff(game) >= 150), underdogMmrDiff));
 
   return highlights;
+}
+
+function groupedHighlights(highlights: Highlight[]) {
+  const groups: Array<{ label: string; games: OutlierGame[] }> = [];
+  for (const highlight of highlights) {
+    const group = groups.find((entry) => entry.label === highlight.label);
+    if (group) group.games.push(highlight.game);
+    else groups.push({ label: highlight.label, games: [highlight.game] });
+  }
+  return groups;
 }
 
 function HighlightsSection({
@@ -195,16 +189,21 @@ function HighlightsSection({
         <p className='text-sm text-slate-400'>Quick picks from the currently saved outlier games.</p>
       </div>
       <div className='space-y-4'>
-        {highlights.map((highlight) => (
-          <div key={`${highlight.label}-${highlight.game.id}`} className='space-y-2'>
+        {groupedHighlights(highlights).map((group) => (
+          <div key={group.label} className='space-y-3'>
             <span className='inline-flex rounded-full border border-gold/25 bg-gold/10 px-2.5 py-1 text-xs font-bold uppercase tracking-wide text-gold'>
-              {highlight.label}
+              {group.label}
             </span>
-            <GameCard
-              outlier={highlight.game}
-              spoilerLight={spoilerLight}
-              isNew={highlight.game.selectedAt.getTime() > lastSeenAt}
-            />
+            <div className='space-y-4'>
+              {group.games.map((game) => (
+                <GameCard
+                  key={game.id}
+                  outlier={game}
+                  spoilerLight={spoilerLight}
+                  isNew={game.selectedAt.getTime() > lastSeenAt}
+                />
+              ))}
+            </div>
           </div>
         ))}
       </div>
@@ -224,6 +223,52 @@ function highlightFromData(entry: unknown): Highlight | null {
     label: data.label,
     game: hydrateGame(data.game as Record<string, unknown>),
   };
+}
+
+function normalizeHighlightLabels(highlights: Highlight[]) {
+  return highlights.map((highlight) => {
+    const label = highlight.label.replace(/\s+#\d+$/, '');
+    if (label === 'Highest Score') return { ...highlight, label: 'Top 3 highest scores' };
+    if (label === 'Best Pro Match' || label === 'Top Pro Match') return { ...highlight, label: 'Top 3 pro matches' };
+    if (label === 'Biggest Upset') return { ...highlight, label: 'Top 3 biggest upsets' };
+    return { ...highlight, label };
+  });
+}
+
+function PaginationControls({
+  currentPage,
+  totalPages,
+  onPrevious,
+  onNext,
+}: {
+  currentPage: number;
+  totalPages: number;
+  onPrevious: () => void;
+  onNext: () => void;
+}) {
+  return (
+    <div className='flex flex-wrap items-center justify-center gap-3 text-sm text-slate-300'>
+      <button
+        type='button'
+        onClick={onPrevious}
+        disabled={currentPage === 1}
+        className='rounded-md border border-white/10 px-3 py-2 font-bold text-white disabled:cursor-not-allowed disabled:opacity-40'
+      >
+        Previous
+      </button>
+      <span>
+        Page {currentPage} of {totalPages}
+      </span>
+      <button
+        type='button'
+        onClick={onNext}
+        disabled={currentPage === totalPages}
+        className='rounded-md border border-white/10 px-3 py-2 font-bold text-white disabled:cursor-not-allowed disabled:opacity-40'
+      >
+        Next
+      </button>
+    </div>
+  );
 }
 
 export function OutlierFeed({
@@ -294,9 +339,9 @@ export function OutlierFeed({
           }
         }
 
-        const fetchLimit = mode === 'latest' ? pageSize ?? 15 : 250;
+        const fetchLimit = mode === 'archive' || showHighlights ? 250 : pageSize ?? 15;
         const gamesQuery = query(collection(db, 'outlierGames'), orderBy('selectedAt', 'desc'), limit(fetchLimit));
-        const archiveSnapshotPromise = mode === 'archive'
+        const archiveSnapshotPromise = mode === 'archive' || showHighlights
           ? getDoc(doc(db, 'meta', 'archiveSnapshot')).catch(() => null)
           : Promise.resolve(null);
         const highlightPromise = showHighlights
@@ -368,7 +413,11 @@ export function OutlierFeed({
     return visibleGames.slice(start, start + ARCHIVE_PAGE_SIZE);
   }, [currentPage, mode, pageSize, visibleGames]);
   const highlights = useMemo(
-    () => (showHighlights ? (savedHighlights.length ? savedHighlights : selectHighlights(games)) : []),
+    () => {
+      if (!showHighlights) return [];
+      const currentHighlights = normalizeHighlightLabels(savedHighlights.filter((highlight) => highlight.label !== 'Best Comeback'));
+      return games.length ? selectHighlights(games) : currentHighlights;
+    },
     [games, savedHighlights, showHighlights],
   );
 
@@ -406,10 +455,13 @@ export function OutlierFeed({
 
   const countLabel =
     mode === 'latest'
-      ? `Showing ${feedGames.length} latest games (Updated hourly)`
+      ? 'Games are updated every hour'
       : visibleGames.length
         ? `Showing ${(currentPage - 1) * ARCHIVE_PAGE_SIZE + 1}-${(currentPage - 1) * ARCHIVE_PAGE_SIZE + feedGames.length} of ${visibleGames.length} matching games`
         : 'No matching games';
+  const showPagination = mode === 'archive' && totalPages > 1;
+  const goToPreviousPage = () => setCurrentPage((page) => Math.max(1, page - 1));
+  const goToNextPage = () => setCurrentPage((page) => Math.min(totalPages, page + 1));
 
   if (loading) {
     return (
@@ -426,30 +478,38 @@ export function OutlierFeed({
 
   return (
     <div className='space-y-4'>
+      <div className='flex flex-wrap items-center justify-between gap-3 rounded-lg border border-white/10 bg-slate-950/70 px-3 py-2 text-sm text-slate-400'>
+        <span>{countLabel}</span>
+        <div className='flex flex-wrap items-center gap-3'>
+          <span>Last successful scan: {lastScan}</span>
+          <label className='flex items-center gap-2 rounded-md border border-white/10 bg-slate-900/80 px-2.5 py-1.5 text-slate-300'>
+            <input
+              type='checkbox'
+              checked={spoilerLight}
+              onChange={toggleSpoilerLight}
+              className='h-4 w-4 accent-sky-400'
+            />
+            Spoiler-light
+          </label>
+        </div>
+      </div>
+      {showPagination ? (
+        <PaginationControls
+          currentPage={currentPage}
+          totalPages={totalPages}
+          onPrevious={goToPreviousPage}
+          onNext={goToNextPage}
+        />
+      ) : null}
       {highlights.length ? <HighlightsSection highlights={highlights} spoilerLight={spoilerLight} lastSeenAt={lastSeenAt} /> : null}
       {feedGames.length ? (
         <section className='space-y-3'>
           {mode === 'latest' ? (
             <div>
-              <h2 className='text-xl font-black text-white'>Latest games</h2>
+              <h2 className='text-xl font-black text-white'>Top 3 most recent games</h2>
               <p className='text-sm text-slate-400'>The newest outlier games saved by the scanner.</p>
             </div>
           ) : null}
-          <div className='flex flex-wrap items-center justify-between gap-3 text-sm text-slate-400'>
-            <span>{countLabel}</span>
-            <div className='flex flex-wrap items-center gap-3'>
-              <span>Last successful scan: {lastScan}</span>
-              <label className='flex items-center gap-2 rounded-md border border-white/10 bg-slate-950/60 px-2.5 py-1.5 text-slate-300'>
-                <input
-                  type='checkbox'
-                  checked={spoilerLight}
-                  onChange={toggleSpoilerLight}
-                  className='h-4 w-4 accent-sky-400'
-                />
-                Spoiler-light
-              </label>
-            </div>
-          </div>
           <div className='space-y-4'>
             {feedGames.map((outlier) => (
               <GameCard
@@ -459,28 +519,13 @@ export function OutlierFeed({
                 isNew={outlier.selectedAt.getTime() > lastSeenAt}
               />
             ))}
-            {mode === 'archive' && totalPages > 1 ? (
-              <div className='flex flex-wrap items-center justify-center gap-3 pt-2 text-sm text-slate-300'>
-                <button
-                  type='button'
-                  onClick={() => setCurrentPage((page) => Math.max(1, page - 1))}
-                  disabled={currentPage === 1}
-                  className='rounded-md border border-white/10 px-3 py-2 font-bold text-white disabled:cursor-not-allowed disabled:opacity-40'
-                >
-                  Previous
-                </button>
-                <span>
-                  Page {currentPage} of {totalPages}
-                </span>
-                <button
-                  type='button'
-                  onClick={() => setCurrentPage((page) => Math.min(totalPages, page + 1))}
-                  disabled={currentPage === totalPages}
-                  className='rounded-md border border-white/10 px-3 py-2 font-bold text-white disabled:cursor-not-allowed disabled:opacity-40'
-                >
-                  Next
-                </button>
-              </div>
+            {showPagination ? (
+              <PaginationControls
+                currentPage={currentPage}
+                totalPages={totalPages}
+                onPrevious={goToPreviousPage}
+                onNext={goToNextPage}
+              />
             ) : null}
             <ScrollToTopButton />
           </div>

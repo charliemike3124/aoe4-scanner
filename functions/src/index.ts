@@ -294,6 +294,21 @@ function eliteBaselineWeight(game: AoeGame) {
   return 0;
 }
 
+function mmrUpsetWeight(diff: number) {
+  if (diff < 150) return 0;
+  const steps = Math.floor((diff - 150) / 50);
+  return 34 + steps * 12 + Math.max(0, steps - 1) * 2;
+}
+
+function lowRatedUpsetBonus(winnerMmr: number) {
+  if (winnerMmr < 1600) return 28;
+  if (winnerMmr < 1700) return 22;
+  if (winnerMmr < 1800) return 16;
+  if (winnerMmr < 1900) return 10;
+  if (winnerMmr < 2000) return 6;
+  return 0;
+}
+
 function scoreGame(game: AoeGame, civStats: Map<string, CivStat>, eliteCivStats = civStats) {
   const reasons: Reason[] = [];
   const tags = new Set<string>();
@@ -340,9 +355,15 @@ function scoreGame(game: AoeGame, civStats: Map<string, CivStat>, eliteCivStats 
     }
     if (winner.mmr != null && loser.mmr != null && winner.mmr < loser.mmr) {
       const diff = loser.mmr - winner.mmr;
-      if (diff >= 400) addReason(reasons, tags, "insane_mmr_upset", `Underdog winner was down ${diff} MMR`, 62, "Insane upset");
-      else if (diff >= 250) addReason(reasons, tags, "strong_mmr_upset", `Underdog winner was down ${diff} MMR`, 46, "Strong upset");
-      else if (diff >= 150) addReason(reasons, tags, "mmr_upset", `Underdog winner was down ${diff} MMR`, 34, "MMR upset");
+      const upsetWeight = mmrUpsetWeight(diff);
+      if (diff >= 350) addReason(reasons, tags, "insane_mmr_upset", `Underdog winner was down ${diff} MMR`, upsetWeight, "Insane upset");
+      else if (diff >= 250) addReason(reasons, tags, "strong_mmr_upset", `Underdog winner was down ${diff} MMR`, upsetWeight, "Strong upset");
+      else if (diff >= 200) addReason(reasons, tags, "major_mmr_upset", `Underdog winner was down ${diff} MMR`, upsetWeight, "Major upset");
+      else if (upsetWeight) addReason(reasons, tags, "mmr_upset", `Underdog winner was down ${diff} MMR`, upsetWeight, "MMR upset");
+      const lowRatedBonus = lowRatedUpsetBonus(winner.mmr);
+      if (lowRatedBonus) {
+        addReason(reasons, tags, "low_rated_underdog_bonus", `Underdog winner was only ${winner.mmr} MMR`, lowRatedBonus, "Low-rated upset");
+      }
     }
     if (loser.mmr != null && loser.mmr >= 2150 && winner.mmr != null && winner.mmr < loser.mmr) {
       addReason(reasons, tags, "elite_opponent", `Winner beat an elite opponent (${loser.name})`, 14, "Elite opponent");
@@ -436,15 +457,6 @@ function selectDiverseCandidates(candidates: ScoredCandidate[], count: number) {
   return selected;
 }
 
-const COMEBACK_REASON_PATTERNS = [
-  "comeback",
-  "villager_deficit",
-  "resource_deficit",
-  "lost_multiple_landmarks",
-  "won_after_losing_tc",
-  "lost_tc",
-];
-
 function storedWinnerAndLoser(game: Pick<StoredOutlierGame, "players">) {
   return {
     winner: game.players.find((player) => player.result?.toLowerCase() === "win"),
@@ -463,17 +475,10 @@ function isStoredEliteGame(game: Pick<StoredOutlierGame, "players">) {
   return mmrs.length >= 2 && mmrs.every((mmr) => mmr != null && mmr >= ELITE_MMR);
 }
 
-function hasStoredComebackSignal(game: Pick<StoredOutlierGame, "reasons">) {
-  return game.reasons.some((reason) => {
-    const haystack = `${reason.type} ${reason.label}`.toLowerCase();
-    return COMEBACK_REASON_PATTERNS.some((pattern) => haystack.includes(pattern));
-  });
-}
-
-function bestStoredBy(games: StoredOutlierGame[], score: (game: StoredOutlierGame) => number) {
-  return (
-    [...games].sort((a, b) => score(b) - score(a) || b.score - a.score || b.selectedAt.getTime() - a.selectedAt.getTime())[0] ?? null
-  );
+function topStoredBy(games: StoredOutlierGame[], score: (game: StoredOutlierGame) => number, count = 3) {
+  return [...games]
+    .sort((a, b) => score(b) - score(a) || b.score - a.score || b.selectedAt.getTime() - a.selectedAt.getTime())
+    .slice(0, count);
 }
 
 function serializeStoredOutlierGame(game: StoredOutlierGame) {
@@ -487,19 +492,17 @@ function serializeStoredOutlierGame(game: StoredOutlierGame) {
 }
 
 function selectHomepageHighlights(games: StoredOutlierGame[]) {
-  const selectedIds = new Set<string>();
   const highlights: Array<{ label: string; game: ReturnType<typeof serializeStoredOutlierGame> }> = [];
 
-  function add(label: string, game: StoredOutlierGame | null) {
-    if (!game || selectedIds.has(game.id)) return;
-    selectedIds.add(game.id);
-    highlights.push({ label, game: serializeStoredOutlierGame(game) });
+  function addMany(label: string, nextGames: StoredOutlierGame[]) {
+    for (const game of nextGames) {
+      highlights.push({ label, game: serializeStoredOutlierGame(game) });
+    }
   }
 
-  add("Highest Score", bestStoredBy(games.filter((game) => game.score >= 100), (game) => game.score));
-  add("Best Comeback", bestStoredBy(games.filter((game) => !selectedIds.has(game.id) && hasStoredComebackSignal(game)), (game) => game.score));
-  add("Best Pro Match", bestStoredBy(games.filter((game) => !selectedIds.has(game.id) && isStoredEliteGame(game)), (game) => game.score));
-  add("Biggest Upset", bestStoredBy(games.filter((game) => !selectedIds.has(game.id) && storedUnderdogMmrDiff(game) >= 150), storedUnderdogMmrDiff));
+  addMany("Top 3 highest scores", topStoredBy(games.filter((game) => game.score >= 100), (game) => game.score));
+  addMany("Top 3 pro matches", topStoredBy(games.filter((game) => isStoredEliteGame(game)), (game) => game.score));
+  addMany("Top 3 biggest upsets", topStoredBy(games.filter((game) => storedUnderdogMmrDiff(game) >= 150), storedUnderdogMmrDiff));
 
   return highlights;
 }
@@ -1471,7 +1474,8 @@ async function updateHomepageHighlights() {
   const games = snapshot.docs
     .map((doc) => storedOutlierFromData(doc.id, record(doc.data())))
     .filter((game) => game.expiresAt >= now)
-    .sort((a, b) => b.selectedAt.getTime() - a.selectedAt.getTime());
+    .sort((a, b) => b.selectedAt.getTime() - a.selectedAt.getTime())
+    .slice(0, ARCHIVE_SNAPSHOT_LIMIT);
   const highlights = selectHomepageHighlights(games);
   await HOMEPAGE_HIGHLIGHTS_DOC.set(
     {

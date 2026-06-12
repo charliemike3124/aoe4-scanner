@@ -34,6 +34,13 @@ export function ArchiveFilters({
   onReset?: () => void;
 }) {
   const [maps, setMaps] = useState<string[]>(STATIC_MAP_POOL);
+  const [minEloValue, setMinEloValue] = useState(filters.minElo ?? "");
+  const parsedMinElo = Number(minEloValue);
+  const maxEloMin = Number.isFinite(parsedMinElo) && minEloValue !== "" ? parsedMinElo + 1 : 0;
+
+  useEffect(() => {
+    setMinEloValue(filters.minElo ?? "");
+  }, [filters.minElo]);
 
   useEffect(() => {
     const cached = readCachedMapPool();
@@ -98,11 +105,11 @@ export function ArchiveFilters({
           <input
             name="minElo"
             type="number"
-            min={1600}
-            max={2500}
-            step={50}
+            min={0}
+            step={1}
             defaultValue={filters.minElo ?? ""}
-            placeholder="1600"
+            onChange={(event) => setMinEloValue(event.currentTarget.value)}
+            placeholder="Any"
             className="h-10 w-full rounded-md border border-white/10 bg-slate-900 px-3 py-2 text-white outline-none"
           />
         </label>
@@ -111,11 +118,10 @@ export function ArchiveFilters({
           <input
             name="maxElo"
             type="number"
-            min={1600}
-            max={2500}
-            step={50}
+            min={maxEloMin}
+            step={1}
             defaultValue={filters.maxElo ?? ""}
-            placeholder="2500"
+            placeholder="Any"
             className="h-10 w-full rounded-md border border-white/10 bg-slate-900 px-3 py-2 text-white outline-none"
           />
         </label>

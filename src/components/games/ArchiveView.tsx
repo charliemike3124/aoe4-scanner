@@ -45,6 +45,11 @@ export function ArchiveView() {
   }), [searchParams]);
 
   const activeFilters = hasSearchParams ? filters : { ...filters, ...savedFilters };
+  const minElo = activeFilters.minElo ? Number(activeFilters.minElo) : undefined;
+  const maxElo =
+    activeFilters.maxElo && (minElo == null || Number(activeFilters.maxElo) > minElo)
+      ? Number(activeFilters.maxElo)
+      : undefined;
 
   function applyFilters(formData: FormData) {
     const next = new URLSearchParams();
@@ -72,8 +77,8 @@ export function ArchiveView() {
           q: activeFilters.q,
           civilization: activeFilters.civilization,
           map: activeFilters.map,
-          minElo: activeFilters.minElo ? Number(activeFilters.minElo) : undefined,
-          maxElo: activeFilters.maxElo ? Number(activeFilters.maxElo) : undefined,
+          minElo,
+          maxElo,
           minScore: activeFilters.minScore ? Number(activeFilters.minScore) : undefined,
           maxScore: activeFilters.maxScore ? Number(activeFilters.maxScore) : undefined,
           sort: activeFilters.sort === "score" ? "score" : "newest",
