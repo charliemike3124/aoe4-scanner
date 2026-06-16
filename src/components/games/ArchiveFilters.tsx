@@ -196,6 +196,10 @@ export function ArchiveFilters({
           <input name="upsetsOnly" value="true" type="checkbox" defaultChecked={filters.upsetsOnly === "true"} className="h-4 w-4 accent-sky-400" />
           Upsets only
         </label>
+        <label className="flex items-end gap-2 pb-2 text-sm text-slate-300">
+          <input name="civMainsOnly" value="true" type="checkbox" defaultChecked={filters.civMainsOnly === "true"} className="h-4 w-4 accent-gold" />
+          Civ mains only
+        </label>
       </div>
       <div className="mt-4 flex gap-2">
         <button className={buttonClassName()} type="submit">

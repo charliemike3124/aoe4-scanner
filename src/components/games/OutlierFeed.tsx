@@ -33,11 +33,12 @@ type FeedFilters = {
   latest48h?: boolean;
   bookmarkedOnly?: boolean;
   upsetsOnly?: boolean;
+  civMainsOnly?: boolean;
 };
 
 const CACHE_TTL_MS = 15 * 60 * 1000;
 const ARCHIVE_PAGE_SIZE = 20;
-const CACHE_PREFIX = 'aoe4scanner:feed-cache:v2:';
+const CACHE_PREFIX = 'aoe4scanner:feed-cache:v3:';
 const BOOKMARKS_KEY = 'aoe4scanner:bookmarks';
 const LAST_SEEN_KEY = 'aoe4scanner:last-seen-selected-at';
 const SPOILER_KEY = 'aoe4scanner:spoiler-light';
@@ -87,7 +88,16 @@ function matchesClientFilters(game: OutlierGame, filters: FeedFilters, bookmarks
     const needle = filters.q.toLowerCase();
     if (!game.players.some((player) => player.name.toLowerCase().includes(needle))) return false;
   }
-  if (filters.civilization && !game.civilizations.includes(filters.civilization)) return false;
+  if (filters.civMainsOnly) {
+    const hasMatchingMain = game.players.some((player) => {
+      const mainCiv = player.civilizationMain?.civilization;
+      if (!mainCiv) return false;
+      return filters.civilization ? mainCiv === filters.civilization : true;
+    });
+    if (!hasMatchingMain) return false;
+  } else if (filters.civilization && !game.civilizations.includes(filters.civilization)) {
+    return false;
+  }
   if (filters.map && !game.map?.toLowerCase().includes(filters.map.toLowerCase())) return false;
   if (filters.latest48h && game.startedAt.getTime() < Date.now() - 48 * 60 * 60 * 1000) return false;
   if (filters.minScore != null && game.score < filters.minScore) return false;

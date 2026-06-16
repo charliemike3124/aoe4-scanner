@@ -1,9 +1,18 @@
 export type PlayerResult = 'win' | 'loss' | string;
 
+export type CivilizationMain = {
+  civilization: string;
+  pickRate: number;
+  gamesCount: number;
+  winRate: number | null;
+  leaderboard: 'rm_solo';
+};
+
 export type GameParticipant = {
   profileId: string;
   name: string;
   civilization: string | null;
+  civilizationMain?: CivilizationMain | null;
   rating: number | null;
   mmr: number | null;
   ratingDiff: number | null;

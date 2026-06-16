@@ -7,7 +7,7 @@ import { ArchiveFilters } from "@/components/games/ArchiveFilters";
 import { OutlierFeed } from "@/components/games/OutlierFeed";
 
 const ARCHIVE_FILTERS_KEY = "aoe4scanner:archive-filters";
-const FILTER_KEYS = ["q", "civilization", "map", "minElo", "maxElo", "minScore", "maxScore", "strategy", "sort", "latest48h", "bookmarkedOnly", "upsetsOnly"];
+const FILTER_KEYS = ["q", "civilization", "map", "minElo", "maxElo", "minScore", "maxScore", "strategy", "sort", "latest48h", "bookmarkedOnly", "upsetsOnly", "civMainsOnly"];
 
 function readSavedFilters() {
   try {
@@ -43,6 +43,7 @@ export function ArchiveView() {
     latest48h: searchParams.get("latest48h") ?? undefined,
     bookmarkedOnly: searchParams.get("bookmarkedOnly") ?? undefined,
     upsetsOnly: searchParams.get("upsetsOnly") ?? undefined,
+    civMainsOnly: searchParams.get("civMainsOnly") ?? undefined,
   }), [searchParams]);
 
   const activeFilters = hasSearchParams ? filters : { ...filters, ...savedFilters };
@@ -87,6 +88,7 @@ export function ArchiveView() {
           latest48h: activeFilters.latest48h === "true",
           bookmarkedOnly: activeFilters.bookmarkedOnly === "true",
           upsetsOnly: activeFilters.upsetsOnly === "true",
+          civMainsOnly: activeFilters.civMainsOnly === "true",
         }}
       />
     </>

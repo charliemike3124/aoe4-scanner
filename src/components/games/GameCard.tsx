@@ -8,7 +8,7 @@ import { OutlierBadge } from "@/components/games/OutlierBadge";
 import { ScorePill } from "@/components/games/ScorePill";
 import { buttonClassName } from "@/components/ui/button";
 import { Tooltip } from "@/components/ui/tooltip";
-import { formatDuration } from "@/lib/format";
+import { formatCivilization, formatDuration } from "@/lib/format";
 import type { OutlierGame } from "@/lib/types";
 import { cn } from "@/lib/utils";
 
@@ -43,6 +43,10 @@ function playerStateClass(result?: string | null, spoilerLight = false) {
 
 function formatRating(value?: number | null) {
   return value == null ? "Unrated" : value.toString();
+}
+
+function formatPercent(value: number) {
+  return `${value.toFixed(value % 1 === 0 ? 0 : 1)}%`;
 }
 
 function socialIcon(key: string, url: string) {
@@ -173,6 +177,17 @@ export function GameCard({
                     </Link>
                     <div className="mt-1 flex flex-wrap items-center gap-2">
                       <CivilizationPill civilization={participant.civilization} />
+                      {participant.civilizationMain ? (
+                        <a
+                          href={`${playerPageUrl(participant)}?leaderboard=rm_solo#civilizations`}
+                          target="_blank"
+                          rel="noreferrer"
+                          className="rounded-sm border border-gold/30 bg-gold/10 px-2 py-0.5 text-xs font-semibold text-gold transition hover:border-gold/50 hover:bg-gold/15"
+                          title={`${formatCivilization(participant.civilizationMain.civilization)} main: ${formatPercent(participant.civilizationMain.pickRate)} pick rate across ${participant.civilizationMain.gamesCount} games`}
+                        >
+                          {formatCivilization(participant.civilizationMain.civilization)} main · {formatPercent(participant.civilizationMain.pickRate)} · {participant.civilizationMain.gamesCount}g
+                        </a>
+                      ) : null}
                       <span className="rounded-sm border border-white/10 bg-white/[0.03] px-2 py-0.5 text-xs text-slate-300">
                         Elo {formatRating(participant.rating)}
                       </span>

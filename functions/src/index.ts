@@ -16,6 +16,7 @@ const PUBLIC_STATUS_DOC = db.collection("meta").doc("publicStatus");
 const ARCHIVE_SNAPSHOT_DOC = db.collection("meta").doc("archiveSnapshot");
 const MAP_POOL_DOC = db.collection("meta").doc("mapPool");
 const AGEUP_STATS_DOC = db.collection("meta").doc("ageupStats");
+const PLAYER_CIVILIZATION_MAIN_COLLECTION = db.collection("playerCivilizationMains");
 const OUTLIER_COLLECTION = db.collection("outlierGames");
 const IGNORED_COLLECTION = db.collection("ignoredGames");
 const MIN_RATING = 1700;
@@ -42,6 +43,9 @@ const PUBLIC_META_QUERY_LIMIT = 250;
 const AGEUP_STATS_MAX_AGE_DAYS = 10;
 const AGEUP_STATS_SCHEMA_VERSION = 3;
 const AGEUP_ANALYTICS_KIND = "rm_solo";
+const CIVILIZATION_MAIN_PICK_RATE = 35;
+const CIVILIZATION_MAIN_MIN_GAMES = 20;
+const CIVILIZATION_MAIN_CACHE_HOURS = 24;
 const AGEUP_ANALYTICS_CIVILIZATIONS = [
   "abbasid_dynasty",
   "ayyubids",
@@ -74,6 +78,7 @@ type AoePlayer = {
   profileId: string;
   name: string;
   civilization: string | null;
+  civilizationMain?: CivilizationMain | null;
   rating: number | null;
   mmr: number | null;
   ratingDiff: number | null;
@@ -104,6 +109,14 @@ type CivStat = {
   civilization: string;
   winRate: number;
   pickRate: number;
+};
+
+type CivilizationMain = {
+  civilization: string;
+  pickRate: number;
+  gamesCount: number;
+  winRate: number | null;
+  leaderboard: "rm_solo";
 };
 
 type MatchupStat = {
@@ -244,6 +257,35 @@ function socialLinks(value: unknown) {
   return links;
 }
 
+function parseCivilizationMain(rawCivilizations: unknown): CivilizationMain | null {
+  const mains = arrayValue(rawCivilizations)
+    .map((raw) => {
+      const stat = record(raw);
+      const civilization = stringValue(stat.civilization);
+      const pickRate = numberValue(stat.pick_rate, stat.pickRate);
+      const gamesCount = intValue(stat.games_count, stat.gamesCount);
+      if (!civilization || pickRate == null || gamesCount == null) return null;
+      return {
+        civilization,
+        pickRate,
+        gamesCount,
+        winRate: numberValue(stat.win_rate, stat.winRate),
+        leaderboard: "rm_solo" as const,
+      };
+    })
+    .filter((main): main is CivilizationMain => Boolean(main))
+    .filter((main) => main.pickRate >= CIVILIZATION_MAIN_PICK_RATE && main.gamesCount >= CIVILIZATION_MAIN_MIN_GAMES)
+    .sort((a, b) => b.pickRate - a.pickRate || b.gamesCount - a.gamesCount);
+
+  return mains[0] ?? null;
+}
+
+function civilizationMainFromPlayerProfile(payload: unknown): CivilizationMain | null {
+  const modes = record(record(payload).modes);
+  const rmSolo = record(modes.rm_solo);
+  return parseCivilizationMain(rmSolo.civilizations);
+}
+
 async function fetchJson<T>(url: URL, retries = 2): Promise<T> {
   let lastError: Error | null = null;
   for (let attempt = 0; attempt <= retries; attempt += 1) {
@@ -266,6 +308,68 @@ async function fetchJson<T>(url: URL, retries = 2): Promise<T> {
     break;
   }
   throw lastError ?? new Error("AOE4World request failed");
+}
+
+async function loadPlayerCivilizationMain(profileId: string): Promise<CivilizationMain | null> {
+  const ref = PLAYER_CIVILIZATION_MAIN_COLLECTION.doc(profileId);
+  const snapshot = await ref.get();
+  const data = snapshot.data();
+  const refreshedAt = data?.refreshedAt instanceof Timestamp ? data.refreshedAt.toDate() : null;
+  if (refreshedAt && Date.now() - refreshedAt.getTime() < CIVILIZATION_MAIN_CACHE_HOURS * 60 * 60 * 1000) {
+    return (data?.main as CivilizationMain | null | undefined) ?? null;
+  }
+
+  const url = new URL(`${API_BASE}/players/${profileId}`);
+  const payload = await fetchJson<unknown>(url);
+  const main = civilizationMainFromPlayerProfile(payload);
+  await ref.set(
+    {
+      profileId,
+      main,
+      thresholds: {
+        pickRate: CIVILIZATION_MAIN_PICK_RATE,
+        gamesCount: CIVILIZATION_MAIN_MIN_GAMES,
+      },
+      refreshedAt: FieldValue.serverTimestamp(),
+    },
+    { merge: true },
+  );
+  return main;
+}
+
+async function enrichGamePlayersWithCivilizationMains(game: AoeGame) {
+  const enrichedPlayers: AoePlayer[] = [];
+  const distinctLookups = new Map<string, Promise<CivilizationMain | null>>();
+
+  for (const player of game.players) {
+    if (!distinctLookups.has(player.profileId)) {
+      distinctLookups.set(
+        player.profileId,
+        loadPlayerCivilizationMain(player.profileId).catch((error) => {
+          logger.debug("Player civilization main lookup skipped", { profileId: player.profileId, error });
+          return null;
+        }),
+      );
+    }
+  }
+
+  for (const player of game.players) {
+    enrichedPlayers.push({
+      ...player,
+      civilizationMain: (await distinctLookups.get(player.profileId)) ?? null,
+    });
+  }
+
+  return { ...game, players: enrichedPlayers };
+}
+
+async function enrichSelectedCandidatesWithCivilizationMains(candidates: ScoredCandidate[]) {
+  const enriched: ScoredCandidate[] = [];
+  for (const candidate of candidates) {
+    enriched.push({ ...candidate, game: await enrichGamePlayersWithCivilizationMains(candidate.game) });
+    await sleep(250);
+  }
+  return enriched;
 }
 
 function normalizeGame(raw: unknown): AoeGame | null {
@@ -1592,7 +1696,9 @@ async function runScan(forcePlayers = false, options: { allowDeepFallback?: bool
       expanded = true;
     }
 
-    for (const candidate of selection.selected) {
+    const selectedWithCivilizationMains = await enrichSelectedCandidatesWithCivilizationMains(selection.selected);
+
+    for (const candidate of selectedWithCivilizationMains) {
       const expiresAt = new Date(candidate.game.startedAt.getTime() + 14 * 24 * 60 * 60 * 1000);
       await OUTLIER_COLLECTION.doc(candidate.game.aoe4worldGameId).set({
         ...candidate.game,
@@ -1610,9 +1716,9 @@ async function runScan(forcePlayers = false, options: { allowDeepFallback?: bool
     }
 
     const now = FieldValue.serverTimestamp();
-    const selectedGameIds = selection.selected.map((candidate) => candidate.game.aoe4worldGameId);
+    const selectedGameIds = selectedWithCivilizationMains.map((candidate) => candidate.game.aoe4worldGameId);
     const selectedGameUrls = Object.fromEntries(
-      selection.selected.map((candidate) => [candidate.game.aoe4worldGameId, candidate.summaryUrl ?? candidate.game.aoe4worldUrl]),
+      selectedWithCivilizationMains.map((candidate) => [candidate.game.aoe4worldGameId, candidate.summaryUrl ?? candidate.game.aoe4worldUrl]),
     );
     const totalApiRequestsMade = primaryFetch.diagnostics.apiRequestsMade + (expandedFetchDiagnostics?.apiRequestsMade ?? 0);
     const totalRawGamesFetched = primaryFetch.diagnostics.rawGamesFetched + (expandedFetchDiagnostics?.rawGamesFetched ?? 0);
@@ -1624,7 +1730,7 @@ async function runScan(forcePlayers = false, options: { allowDeepFallback?: bool
       primaryFetch.diagnostics.eligibleGamesCollected + (expandedFetchDiagnostics?.eligibleGamesCollected ?? 0);
     if (selectedGameIds.length) await markFreshPicks(selectedGameIds);
     const message = selection.selected.length
-      ? `Stored ${selection.selected.length} games: ${selectedGameIds.join(", ")}.`
+      ? `Stored ${selectedWithCivilizationMains.length} games: ${selectedGameIds.join(", ")}.`
       : selection.qualified.length
         ? `Found ${selection.qualified.length} qualified candidates, but none were selected after filtering.`
         : `No candidate crossed score ${MIN_SCORE}.`;
@@ -1654,7 +1760,7 @@ async function runScan(forcePlayers = false, options: { allowDeepFallback?: bool
           selectedGameId: selectedGameIds[0] ?? null,
           selectedGameIds,
           selectedGameUrls,
-          storedCount: selection.selected.length,
+          storedCount: selectedWithCivilizationMains.length,
           summaryFinalistsChecked: selection.finalists.length,
           excludedGames: excludedGameIds.size,
           rejectedCached,
@@ -1718,7 +1824,7 @@ async function runScan(forcePlayers = false, options: { allowDeepFallback?: bool
       selectedGameId: selectedGameIds[0] ?? null,
       selectedGameIds,
       selectedGameUrls,
-      storedCount: selection.selected.length,
+      storedCount: selectedWithCivilizationMains.length,
       summaryFinalistsChecked: selection.finalists.length,
       excludedGames: excludedGameIds.size,
       rejectedCached,
@@ -1780,6 +1886,21 @@ function storedDate(value: unknown) {
   return dateValue(value) ?? new Date(0);
 }
 
+function storedCivilizationMain(value: unknown): CivilizationMain | null {
+  const main = record(value);
+  const civilization = stringValue(main.civilization);
+  const pickRate = numberValue(main.pickRate, main.pick_rate);
+  const gamesCount = intValue(main.gamesCount, main.games_count);
+  if (!civilization || pickRate == null || gamesCount == null) return null;
+  return {
+    civilization,
+    pickRate,
+    gamesCount,
+    winRate: numberValue(main.winRate, main.win_rate),
+    leaderboard: "rm_solo",
+  };
+}
+
 function storedGameFromData(id: string, data: AnyRecord): AoeGame {
   const players = arrayValue(data.players).map((raw, index) => {
     const player = record(raw);
@@ -1787,6 +1908,7 @@ function storedGameFromData(id: string, data: AnyRecord): AoeGame {
       profileId: stringValue(player.profileId, player.profile_id) ?? crypto.randomUUID(),
       name: stringValue(player.name) ?? "Unknown player",
       civilization: stringValue(player.civilization),
+      civilizationMain: storedCivilizationMain(player.civilizationMain ?? player.civilization_main),
       rating: intValue(player.rating),
       mmr: intValue(player.mmr),
       ratingDiff: intValue(player.ratingDiff, player.rating_diff),
