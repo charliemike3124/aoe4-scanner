@@ -643,10 +643,10 @@ async function findUnsavedCandidates<T extends { game: AoeGame }>(candidates: T[
   return unsaved;
 }
 
-async function loadExcludedGameIds() {
+async function loadExcludedGameIds(since: Date) {
   const [savedSnapshot, ignoredSnapshot] = await Promise.all([
-    OUTLIER_COLLECTION.where("expiresAt", ">=", Timestamp.fromDate(new Date())).select().limit(500).get(),
-    IGNORED_COLLECTION.where("expiresAt", ">=", Timestamp.fromDate(new Date())).select().limit(1000).get(),
+    OUTLIER_COLLECTION.where("startedAt", ">=", Timestamp.fromDate(since)).select().limit(500).get(),
+    IGNORED_COLLECTION.where("startedAt", ">=", Timestamp.fromDate(since)).select().limit(1000).get(),
   ]);
   return new Set([...savedSnapshot.docs.map((doc) => doc.id), ...ignoredSnapshot.docs.map((doc) => doc.id)]);
 }
@@ -1669,7 +1669,7 @@ async function runScan(forcePlayers = false, options: { allowDeepFallback?: bool
       loadMatchupStats(">1700"),
       loadAgeupStats(),
     ]);
-    const excludedGameIds = await loadExcludedGameIds();
+    const excludedGameIds = await loadExcludedGameIds(expandedSince);
     const scanStateSnapshot = await SCAN_STATE_DOC.get();
     const scanState = scanStateSnapshot.data();
     const startPlayerOffset = intValue(scanState?.nextPlayerOffset) ?? 0;
@@ -2071,8 +2071,8 @@ async function rescoreSavedOutliers(dryRun = true) {
 
 export const scanOutliersEveryThreeHours = onSchedule(
   {
-    schedule: "0 * * * *",
-    timeZone: "Etc/UTC",
+    schedule: "0 4-22 * * *",
+    timeZone: "America/Bogota",
     region: "us-central1",
     timeoutSeconds: 540,
     memory: "512MiB",
