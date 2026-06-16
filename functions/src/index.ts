@@ -32,7 +32,7 @@ const SUMMARY_FINALIST_COUNT = 5;
 const ELITE_SUMMARY_PROBE_COUNT = 3;
 const FRESH_PICK_SCAN_WINDOW = 3;
 const MIN_GAME_DURATION_SECONDS = 8 * 60;
-const MIN_SCORE = 32;
+const MIN_SCORE = 50;
 const ELITE_MMR = 2000;
 const CANDIDATE_LOOKBACK_HOURS = 12;
 const IGNORED_GAME_TTL_HOURS = 24;
@@ -40,7 +40,7 @@ const PRIMARY_LOOKBACK_HOURS = 6;
 const ARCHIVE_SNAPSHOT_LIMIT = 200;
 const PUBLIC_META_QUERY_LIMIT = 250;
 const AGEUP_STATS_MAX_AGE_DAYS = 10;
-const AGEUP_STATS_SCHEMA_VERSION = 2;
+const AGEUP_STATS_SCHEMA_VERSION = 3;
 const AGEUP_ANALYTICS_KIND = "rm_solo";
 const AGEUP_ANALYTICS_CIVILIZATIONS = [
   "abbasid_dynasty",
@@ -717,9 +717,8 @@ function scoreRareAgeupPath(candidate: ScoredCandidate, winnerSummary: AnyRecord
 
   const ageups = winnerAgeupPath(winnerSummary);
   let best: AgeupStat | null = null;
-  for (let index = 0; index < ageups.length; index += 1) {
-    const path = ageups.slice(0, index + 1).map((ageup) => ageup.pbgid);
-    const stat = ageupStats.get(ageupPathKey(civilization, path));
+  for (const ageup of ageups) {
+    const stat = ageupStats.get(ageupPathKey(civilization, [ageup.pbgid]));
     if (!stat) continue;
     if (!best || stat.pickRate < best.pickRate) best = stat;
   }
@@ -738,7 +737,7 @@ function scoreRareAgeupPath(candidate: ScoredCandidate, winnerSummary: AnyRecord
   addSummaryReason(
     candidate,
     "summary_rare_landmark_path",
-    `Game summary: ${subject} used rare landmark path ${best.label} (${pickRate}% pick rate, ${best.winRate.toFixed(1)}% win rate)`,
+    `Game summary: ${subject} used rare landmark ${best.label} (${pickRate}% pick rate, ${best.winRate.toFixed(1)}% win rate)`,
     weight,
     "Rare landmarks",
   );
@@ -764,7 +763,7 @@ function analyzeSummary(candidate: ScoredCandidate, summary: unknown, ageupStats
   if (ageupStats.size) scoreRareAgeupPath(candidate, winnerSummary, ageupStats, winnerLabel);
 
   const castleTime = actionTime(winnerSummary, "castleAge");
-  if (castleTime != null && castleTime <= 660 && (candidate.game.durationSeconds ?? 0) >= 20 * 60) {
+  if (castleTime != null && castleTime < 10 * 60 && (candidate.game.durationSeconds ?? 0) >= 20 * 60) {
     addSummaryReason(candidate, "summary_fast_castle", `Game summary: ${winnerLabel} reached Castle Age at ${Math.floor(castleTime / 60)}:${String(castleTime % 60).padStart(2, "0")}`, 6, "Fast Castle");
   }
   const imperialTime = actionTime(winnerSummary, "imperialAge");
@@ -1189,18 +1188,44 @@ async function fetchCurrentAgeupStats() {
 
   function collectSectionStats(sectionData: AnyRecord, defaultCivilization?: string) {
     const sections = [
-      { key: "age1-2", pathLength: 1 },
-      { key: "age1-3", pathLength: 2 },
-      { key: "age1-4", pathLength: 3 },
+      { key: "age1-2", pathLength: 1, pbgidKey: "age2_pbgid", pbgidCamelKey: "age2Pbgid", nameKey: "age2_name", nameCamelKey: "age2Name" },
+      { key: "age1-3", pathLength: 2, pbgidKey: "age3_pbgid", pbgidCamelKey: "age3Pbgid", nameKey: "age3_name", nameCamelKey: "age3Name" },
+      { key: "age1-4", pathLength: 3, pbgidKey: "age4_pbgid", pbgidCamelKey: "age4Pbgid", nameKey: "age4_name", nameCamelKey: "age4Name" },
     ];
     for (const section of sections) {
       const rows = arrayValue(sectionData[section.key]).map(record);
       const totalsByCivilization = new Map<string, number>();
+      const landmarkGroups = new Map<string, { civilization: string; pbgid: number; label: string; playerGamesCount: number; weightedWins: number }>();
       for (const item of rows) {
         const civilization = normalizeCivilizationKey(stringValue(item.civilization)) ?? defaultCivilization;
         const playerGamesCount = intValue(item.player_games_count, item.playerGamesCount) ?? 0;
         if (!civilization || playerGamesCount <= 0) continue;
         totalsByCivilization.set(civilization, (totalsByCivilization.get(civilization) ?? 0) + playerGamesCount);
+        const pbgid = intValue(item[section.pbgidKey], item[section.pbgidCamelKey]);
+        const label = stringValue(item[section.nameKey], item[section.nameCamelKey]);
+        if (pbgid != null && label) {
+          const key = ageupPathKey(civilization, [pbgid]);
+          const group = landmarkGroups.get(key) ?? { civilization, pbgid, label, playerGamesCount: 0, weightedWins: 0 };
+          const winCount = intValue(item.win_count, item.winCount);
+          const winRate = numberValue(item.win_rate, item.winRate) ?? 50;
+          group.playerGamesCount += playerGamesCount;
+          group.weightedWins += winCount ?? (playerGamesCount * winRate) / 100;
+          landmarkGroups.set(key, group);
+        }
+      }
+
+      for (const group of landmarkGroups.values()) {
+        const totalGames = totalsByCivilization.get(group.civilization);
+        if (!totalGames) continue;
+        const stat: AgeupStat = {
+          civilization: group.civilization,
+          path: [group.pbgid],
+          playerGamesCount: group.playerGamesCount,
+          winRate: (group.weightedWins / group.playerGamesCount) * 100,
+          pickRate: (group.playerGamesCount / totalGames) * 100,
+          label: group.label,
+        };
+        stats.set(ageupPathKey(group.civilization, [group.pbgid]), stat);
       }
 
       for (const item of rows) {
