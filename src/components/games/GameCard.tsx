@@ -13,6 +13,7 @@ import type { OutlierGame } from "@/lib/types";
 import { cn } from "@/lib/utils";
 
 const BOOKMARKS_KEY = "aoe4scanner:bookmarks";
+const COLLAPSED_REASON_COUNT = 6;
 
 function readBookmarks() {
   try {
@@ -63,6 +64,12 @@ function playerGamesUrl(player?: OutlierGame["players"][number]) {
   return player?.profileId ? `https://aoe4world.com/players/${player.profileId}/games` : "https://aoe4world.com/games";
 }
 
+function reasonDisplayPriority(reason: OutlierGame["reasons"][number]) {
+  if (reason.type.startsWith("summary_") || reason.type.startsWith("strategy_")) return 3;
+  if (reason.type.includes("upset") || reason.label.toLowerCase().includes("underdog")) return 2;
+  return 1;
+}
+
 export function GameCard({
   outlier,
   compact = false,
@@ -80,7 +87,10 @@ export function GameCard({
   const [expanded, setExpanded] = useState(false);
   const summaryUnavailable = outlier.summaryAvailable === false;
   const aoe4worldHref = summaryUnavailable ? playerPageUrl(players[0]) : outlier.summaryUrl ?? outlier.aoe4worldUrl;
-  const visibleReasons = expanded ? outlier.reasons : outlier.reasons.slice(0, 3);
+  const displayReasons = [...outlier.reasons].sort(
+    (a, b) => reasonDisplayPriority(b) - reasonDisplayPriority(a) || b.weight - a.weight,
+  );
+  const visibleReasons = expanded ? displayReasons : displayReasons.slice(0, COLLAPSED_REASON_COUNT);
 
   useEffect(() => {
     setBookmarked(readBookmarks().has(outlier.id));
@@ -232,7 +242,7 @@ export function GameCard({
                       <li key={`${reason.type}-${reason.label}`}>{reason.label}</li>
                     ))}
                   </ul>
-                  {outlier.reasons.length > 3 ? (
+                  {displayReasons.length > COLLAPSED_REASON_COUNT ? (
                     <button
                       type="button"
                       onClick={() => setExpanded((next) => !next)}
@@ -245,7 +255,7 @@ export function GameCard({
                         </>
                       ) : (
                         <>
-                          Show {outlier.reasons.length - 3} more
+                          Show {displayReasons.length - COLLAPSED_REASON_COUNT} more
                           <ChevronDown className="h-3.5 w-3.5" />
                         </>
                       )}

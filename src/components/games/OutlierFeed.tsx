@@ -41,6 +41,7 @@ const CACHE_PREFIX = 'aoe4scanner:feed-cache:v2:';
 const BOOKMARKS_KEY = 'aoe4scanner:bookmarks';
 const LAST_SEEN_KEY = 'aoe4scanner:last-seen-selected-at';
 const SPOILER_KEY = 'aoe4scanner:spoiler-light';
+const HIGHLIGHT_MAX_AGE_MS = 48 * 60 * 60 * 1000;
 
 function serializeGame(game: OutlierGame) {
   return {
@@ -151,6 +152,7 @@ function topBy(games: OutlierGame[], score: (game: OutlierGame) => number, count
 
 function selectHighlights(games: OutlierGame[]) {
   const highlights: Highlight[] = [];
+  const freshGames = games.filter((game) => game.selectedAt.getTime() >= Date.now() - HIGHLIGHT_MAX_AGE_MS);
 
   function addMany(label: string, nextGames: OutlierGame[]) {
     for (const game of nextGames) {
@@ -158,9 +160,9 @@ function selectHighlights(games: OutlierGame[]) {
     }
   }
 
-  addMany('Top 3 highest scores', topBy(games.filter((game) => game.score >= 100), (game) => game.score));
-  addMany('Top 3 pro matches', topBy(games.filter((game) => isEliteSavedGame(game)), (game) => game.score));
-  addMany('Top 3 biggest upsets', topBy(games.filter((game) => underdogMmrDiff(game) >= 150), underdogMmrDiff));
+  addMany('Top 3 highest scores', topBy(freshGames.filter((game) => game.score >= 100), (game) => game.score));
+  addMany('Top 3 pro matches', topBy(freshGames.filter((game) => isEliteSavedGame(game)), (game) => game.score));
+  addMany('Top 3 biggest upsets', topBy(freshGames.filter((game) => underdogMmrDiff(game) >= 150), underdogMmrDiff));
 
   return highlights;
 }
@@ -425,8 +427,17 @@ export function OutlierFeed({
         ? `Showing ${(currentPage - 1) * ARCHIVE_PAGE_SIZE + 1}-${(currentPage - 1) * ARCHIVE_PAGE_SIZE + feedGames.length} of ${visibleGames.length} matching games`
         : 'No matching games';
   const showPagination = mode === 'archive' && totalPages > 1;
-  const goToPreviousPage = () => setCurrentPage((page) => Math.max(1, page - 1));
-  const goToNextPage = () => setCurrentPage((page) => Math.min(totalPages, page + 1));
+  function changePage(nextPageFor: (page: number) => number) {
+    setCurrentPage((page) => {
+      const nextPage = nextPageFor(page);
+      if (nextPage !== page) {
+        window.requestAnimationFrame(() => window.scrollTo({ top: 0, behavior: 'smooth' }));
+      }
+      return nextPage;
+    });
+  }
+  const goToPreviousPage = () => changePage((page) => Math.max(1, page - 1));
+  const goToNextPage = () => changePage((page) => Math.min(totalPages, page + 1));
 
   if (loading) {
     return (

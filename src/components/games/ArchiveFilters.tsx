@@ -14,10 +14,11 @@ const STATIC_MAP_POOL = [...CURRENT_RM_SOLO_MAPS];
 const STRATEGY_OPTIONS = [
   { label: "Fast Castle", value: "summary_fast_castle" },
   { label: "Fast Imperial", value: "summary_fast_imperial" },
+  { label: "Feudal aggression", value: "strategy_feudal_aggression" },
   { label: "Feudal rams", value: "strategy_feudal_rams" },
   { label: "Multi-TC", value: "summary_multi_tc" },
   { label: "Dark age pressure", value: "summary_dark_age_aggression" },
-  { label: "Dark age tower", value: "strategy_dark_age_tower_rush" },
+  { label: "Dark age tower rush", value: "strategy_dark_age_tower_rush" },
   { label: "Rare landmarks", value: "summary_rare_landmark_path" },
   { label: "Late military", value: "summary_delayed_military" },
 ];
