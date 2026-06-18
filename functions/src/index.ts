@@ -45,7 +45,9 @@ const AGEUP_STATS_SCHEMA_VERSION = 3;
 const AGEUP_ANALYTICS_KIND = "rm_solo";
 const CIVILIZATION_MAIN_PICK_RATE = 35;
 const CIVILIZATION_MAIN_MIN_GAMES = 20;
+const CIVILIZATION_MAIN_HIGH_PICK_RATE = 75;
 const CIVILIZATION_MAIN_CACHE_HOURS = 24;
+const CIVILIZATION_MAIN_RULE_VERSION = 2;
 const AGEUP_ANALYTICS_CIVILIZATIONS = [
   "abbasid_dynasty",
   "ayyubids",
@@ -274,7 +276,11 @@ function parseCivilizationMain(rawCivilizations: unknown): CivilizationMain | nu
       };
     })
     .filter((main): main is CivilizationMain => Boolean(main))
-    .filter((main) => main.pickRate >= CIVILIZATION_MAIN_PICK_RATE && main.gamesCount >= CIVILIZATION_MAIN_MIN_GAMES)
+    .filter(
+      (main) =>
+        main.pickRate >= CIVILIZATION_MAIN_HIGH_PICK_RATE ||
+        (main.pickRate >= CIVILIZATION_MAIN_PICK_RATE && main.gamesCount >= CIVILIZATION_MAIN_MIN_GAMES),
+    )
     .sort((a, b) => b.pickRate - a.pickRate || b.gamesCount - a.gamesCount);
 
   return mains[0] ?? null;
@@ -315,7 +321,8 @@ async function loadPlayerCivilizationMain(profileId: string): Promise<Civilizati
   const snapshot = await ref.get();
   const data = snapshot.data();
   const refreshedAt = data?.refreshedAt instanceof Timestamp ? data.refreshedAt.toDate() : null;
-  if (refreshedAt && Date.now() - refreshedAt.getTime() < CIVILIZATION_MAIN_CACHE_HOURS * 60 * 60 * 1000) {
+  const hasCurrentRules = data?.ruleVersion === CIVILIZATION_MAIN_RULE_VERSION;
+  if (hasCurrentRules && refreshedAt && Date.now() - refreshedAt.getTime() < CIVILIZATION_MAIN_CACHE_HOURS * 60 * 60 * 1000) {
     return (data?.main as CivilizationMain | null | undefined) ?? null;
   }
 
@@ -329,7 +336,9 @@ async function loadPlayerCivilizationMain(profileId: string): Promise<Civilizati
       thresholds: {
         pickRate: CIVILIZATION_MAIN_PICK_RATE,
         gamesCount: CIVILIZATION_MAIN_MIN_GAMES,
+        highPickRate: CIVILIZATION_MAIN_HIGH_PICK_RATE,
       },
+      ruleVersion: CIVILIZATION_MAIN_RULE_VERSION,
       refreshedAt: FieldValue.serverTimestamp(),
     },
     { merge: true },
