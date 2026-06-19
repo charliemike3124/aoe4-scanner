@@ -27,6 +27,8 @@ export type OutlierReason = {
   type: string;
   label: string;
   weight: number;
+  playerProfileId?: string;
+  playerResult?: PlayerResult | null;
 };
 
 export type OutlierGame = {

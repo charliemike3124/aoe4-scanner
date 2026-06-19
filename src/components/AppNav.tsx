@@ -1,5 +1,5 @@
 import Link from "next/link";
-import { Archive, HeartHandshake } from "lucide-react";
+import { Archive, Flag, HeartHandshake } from "lucide-react";
 import { Tooltip } from "@/components/ui/tooltip";
 import { buttonClassName } from "@/components/ui/button";
 import { cn } from "@/lib/utils";
@@ -22,11 +22,19 @@ export function AppNav() {
       </div>
 
       <div className="flex items-center gap-2">
+        <Link href="/mains" className={cn(buttonClassName("ghost"), "px-3 sm:px-4")}>
+          <Flag className="h-4 w-4" />
+          <span className="hidden sm:inline">Civ Mains</span>
+        </Link>
         <Link href="/games" className={cn(buttonClassName("ghost"), "px-3 sm:px-4")}>
           <Archive className="h-4 w-4" />
           <span className="hidden sm:inline">Browse Games</span>
         </Link>
-        <Tooltip side="bottom" align="end" label="Your support helps keep the scanner running, maintained, and useful for the AoE4 community.">
+        <Tooltip
+          side="bottom"
+          align="end"
+          label="Your support helps keep the scanner running, maintained, and useful for the AoE4 community."
+        >
           <a
             href="https://www.paypal.com/donate/?hosted_button_id=H3SK4FD7963UE"
             target="_blank"

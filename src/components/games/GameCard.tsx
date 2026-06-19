@@ -1,6 +1,6 @@
 "use client";
 
-import { useEffect, useState } from "react";
+import { useEffect, useLayoutEffect, useRef, useState } from "react";
 import Link from "next/link";
 import { Bookmark, ChevronDown, ChevronUp, ExternalLink, LinkIcon, Twitch, Youtube } from "lucide-react";
 import { CivilizationPill } from "@/components/games/CivilizationPill";
@@ -13,7 +13,7 @@ import type { OutlierGame } from "@/lib/types";
 import { cn } from "@/lib/utils";
 
 const BOOKMARKS_KEY = "aoe4scanner:bookmarks";
-const COLLAPSED_REASON_COUNT = 6;
+const COLLAPSED_PLAYER_REASON_COUNT = 3;
 
 function readBookmarks() {
   try {
@@ -74,6 +74,123 @@ function reasonDisplayPriority(reason: OutlierGame["reasons"][number]) {
   return 1;
 }
 
+function reasonPlayer(reason: OutlierGame["reasons"][number], players: OutlierGame["players"]) {
+  if (reason.playerProfileId) {
+    const exactPlayer = players.find((player) => player.profileId === reason.playerProfileId);
+    if (exactPlayer) return exactPlayer;
+  }
+
+  const typedPlayer = players.find((player) => reason.type.includes(player.profileId));
+  if (typedPlayer) return typedPlayer;
+
+  const label = reason.label.toLowerCase();
+  const namedPlayer = players.find((player) => label.includes(player.name.toLowerCase()));
+  if (namedPlayer) return namedPlayer;
+
+  if (reason.type.includes("loser") || reason.type.includes("enemy_bled")) {
+    return players.find((player) => player.result?.toLowerCase() === "loss");
+  }
+  if (reason.type.startsWith("summary_") && reason.type !== "summary_rare_win_condition") {
+    return players.find((player) => player.result?.toLowerCase() === "win");
+  }
+  return undefined;
+}
+
+function readableReasonLabel(reason: OutlierGame["reasons"][number], player?: OutlierGame["players"][number]) {
+  let label = reason.label.replace(/^Game summary:\s*/i, "").trim();
+  if (player) {
+    const escapedName = player.name.replace(/[.*+?^${}()|[\]\\]/g, "\\$&");
+    label = label.replace(new RegExp(`^${escapedName}(?:\\s+\\([^)]*\\))?\\s*`, "i"), "");
+    label = label.replace(/^'s\s+/i, "");
+  }
+  return label ? label.charAt(0).toUpperCase() + label.slice(1) : reason.label;
+}
+
+function TagRow({ tags }: { tags: string[] }) {
+  const containerRef = useRef<HTMLDivElement>(null);
+  const tagRefs = useRef<Array<HTMLSpanElement | null>>([]);
+  const moreRef = useRef<HTMLSpanElement>(null);
+  const [visibleCount, setVisibleCount] = useState(tags.length);
+
+  useLayoutEffect(() => {
+    const container = containerRef.current;
+    if (!container) return;
+    const observedContainer = container;
+
+    function measure() {
+      const availableWidth = observedContainer.clientWidth;
+      const tagWidths = tags.map((_, index) => tagRefs.current[index]?.getBoundingClientRect().width ?? 0);
+      const gap = 8;
+      const allTagsWidth = tagWidths.reduce((sum, width) => sum + width, 0) + Math.max(0, tags.length - 1) * gap;
+
+      if (allTagsWidth <= availableWidth) {
+        setVisibleCount(tags.length);
+        return;
+      }
+
+      const moreWidth = moreRef.current?.getBoundingClientRect().width ?? 0;
+      let usedWidth = 0;
+      let nextVisibleCount = 0;
+      for (const width of tagWidths) {
+        const widthWithTag = usedWidth + (nextVisibleCount ? gap : 0) + width;
+        const widthWithOverflow = widthWithTag + gap + moreWidth;
+        if (widthWithOverflow > availableWidth) break;
+        usedWidth = widthWithTag;
+        nextVisibleCount += 1;
+      }
+      setVisibleCount(nextVisibleCount);
+    }
+
+    measure();
+    const observer = new ResizeObserver(measure);
+    observer.observe(observedContainer);
+    return () => observer.disconnect();
+  }, [tags]);
+
+  const hiddenTags = tags.slice(visibleCount);
+
+  return (
+    <div ref={containerRef} className="relative min-w-0">
+      <div className="flex min-w-0 flex-nowrap items-center gap-2">
+        {tags.slice(0, visibleCount).map((tag) => (
+          <span key={tag} className="shrink-0">
+            <OutlierBadge tag={tag} />
+          </span>
+        ))}
+        {hiddenTags.length ? (
+          <span className="shrink-0">
+            <Tooltip label={hiddenTags.join(" · ")} side="top" align="start">
+              <span className="inline-flex cursor-help rounded-full border border-sky-300/20 bg-sky-300/10 px-2.5 py-1 text-xs font-medium text-sky-100">
+                {hiddenTags.length} more
+              </span>
+            </Tooltip>
+          </span>
+        ) : null}
+      </div>
+
+      <div aria-hidden className="pointer-events-none fixed left-[-10000px] top-[-10000px] flex gap-2 opacity-0">
+        {tags.map((tag, index) => (
+          <span
+            key={tag}
+            ref={(element) => {
+              tagRefs.current[index] = element;
+            }}
+            className="shrink-0"
+          >
+            <OutlierBadge tag={tag} />
+          </span>
+        ))}
+        <span
+          ref={moreRef}
+          className="inline-flex shrink-0 rounded-full border border-sky-300/20 bg-sky-300/10 px-2.5 py-1 text-xs font-medium text-sky-100"
+        >
+          {tags.length} more
+        </span>
+      </div>
+    </div>
+  );
+}
+
 export function GameCard({
   outlier,
   compact = false,
@@ -94,7 +211,16 @@ export function GameCard({
   const displayReasons = [...outlier.reasons].sort(
     (a, b) => reasonDisplayPriority(b) - reasonDisplayPriority(a) || b.weight - a.weight,
   );
-  const visibleReasons = expanded ? displayReasons : displayReasons.slice(0, COLLAPSED_REASON_COUNT);
+  const winner = players.find((player) => player.result?.toLowerCase() === "win");
+  const loser = players.find((player) => player.result?.toLowerCase() === "loss");
+  const allWinnerReasons = displayReasons.filter((reason) => reasonPlayer(reason, players)?.profileId === winner?.profileId);
+  const allLoserReasons = displayReasons.filter((reason) => reasonPlayer(reason, players)?.profileId === loser?.profileId);
+  const allMatchReasons = displayReasons.filter((reason) => !reasonPlayer(reason, players));
+  const winnerReasons = expanded ? allWinnerReasons : allWinnerReasons.slice(0, COLLAPSED_PLAYER_REASON_COUNT);
+  const loserReasons = expanded ? allLoserReasons : allLoserReasons.slice(0, COLLAPSED_PLAYER_REASON_COUNT);
+  const matchReasons = expanded ? allMatchReasons : [];
+  const visibleReasonCount = winnerReasons.length + loserReasons.length + matchReasons.length;
+  const hiddenReasonCount = displayReasons.length - visibleReasonCount;
 
   useEffect(() => {
     setBookmarked(readBookmarks().has(outlier.id));
@@ -175,8 +301,10 @@ export function GameCard({
                     >
                       {participant.name}
                     </Link>
-                    <div className="mt-1 flex flex-wrap items-center gap-2">
-                      <CivilizationPill civilization={participant.civilization} />
+                    <div className="mt-1 flex flex-col items-start gap-1.5">
+                      <div>
+                        <CivilizationPill civilization={participant.civilization} />
+                      </div>
                       {participant.civilizationMain ? (
                         <a
                           href={`${playerPageUrl(participant)}?leaderboard=rm_solo#civilizations`}
@@ -188,25 +316,27 @@ export function GameCard({
                           {formatCivilization(participant.civilizationMain.civilization)} main · {formatPercent(participant.civilizationMain.pickRate)} · {participant.civilizationMain.gamesCount}g
                         </a>
                       ) : null}
-                      <span className="rounded-sm border border-white/10 bg-white/[0.03] px-2 py-0.5 text-xs text-slate-300">
-                        Elo {formatRating(participant.rating)}
-                      </span>
-                      {Object.entries(participant.social ?? {}).map(([key, url]) => {
-                        const Icon = socialIcon(key, url);
-                        return (
-                          <a
-                            key={`${participant.profileId}-${key}`}
-                            href={url}
-                            target="_blank"
-                            rel="noreferrer"
-                            className="inline-flex h-6 w-6 items-center justify-center rounded-sm border border-white/10 bg-white/[0.03] text-slate-300 transition hover:border-sky-300/40 hover:text-sky-200"
-                            aria-label={`${participant.name} ${socialLabel(key)}`}
-                            title={socialLabel(key)}
-                          >
-                            <Icon className="h-3.5 w-3.5" />
-                          </a>
-                        );
-                      })}
+                      <div className="flex flex-wrap items-center gap-2">
+                        <span className="rounded-sm border border-white/10 bg-white/[0.03] px-2 py-0.5 text-xs text-slate-300">
+                          Elo {formatRating(participant.rating)}
+                        </span>
+                        {Object.entries(participant.social ?? {}).map(([key, url]) => {
+                          const Icon = socialIcon(key, url);
+                          return (
+                            <a
+                              key={`${participant.profileId}-${key}`}
+                              href={url}
+                              target="_blank"
+                              rel="noreferrer"
+                              className="inline-flex h-6 w-6 items-center justify-center rounded-sm border border-white/10 bg-white/[0.03] text-slate-300 transition hover:border-sky-300/40 hover:text-sky-200"
+                              aria-label={`${participant.name} ${socialLabel(key)}`}
+                              title={socialLabel(key)}
+                            >
+                              <Icon className="h-3.5 w-3.5" />
+                            </a>
+                          );
+                        })}
+                      </div>
                     </div>
                   </div>
                   {!spoilerLight ? (
@@ -245,19 +375,55 @@ export function GameCard({
 
           {!compact ? (
             <div className="space-y-3">
-              <div className="flex flex-wrap gap-2">
-                {outlier.tags.map((tag) => (
-                  <OutlierBadge key={tag} tag={tag} />
-                ))}
-              </div>
+              <TagRow tags={outlier.tags} />
               {!spoilerLight ? (
-                <div className="space-y-2">
-                  <ul className="space-y-1 text-sm text-slate-300">
-                    {visibleReasons.map((reason) => (
-                      <li key={`${reason.type}-${reason.label}`}>{reason.label}</li>
-                    ))}
-                  </ul>
-                  {displayReasons.length > COLLAPSED_REASON_COUNT ? (
+                <div className="space-y-3">
+                  <div className="grid gap-3 md:grid-cols-2">
+                    {players.map((player) => {
+                      const isWinner = player.result?.toLowerCase() === "win";
+                      const column = {
+                        title: isWinner ? "Winner" : "Loser",
+                        player,
+                        reasons: isWinner ? winnerReasons : loserReasons,
+                        tone: isWinner ? "border-emerald-300/20 bg-emerald-400/[0.05]" : "border-rose-300/20 bg-rose-400/[0.05]",
+                        heading: isWinner ? "text-emerald-200" : "text-rose-200",
+                      };
+                      return (
+                        <section key={column.player.profileId} className={cn("rounded-md border p-3", column.tone)}>
+                          <h3 className={cn("text-xs font-bold uppercase tracking-wide", column.heading)}>
+                            {column.title}
+                            <span className="ml-1.5 normal-case tracking-normal text-slate-400">· {column.player.name}</span>
+                          </h3>
+                          {column.reasons.length ? (
+                            <ul className="mt-2 space-y-1.5 text-sm leading-relaxed text-slate-300">
+                              {column.reasons.map((reason) => (
+                                <li key={`${reason.type}-${reason.label}`} className="flex gap-2">
+                                  <span className="mt-[0.55rem] h-1 w-1 shrink-0 rounded-full bg-current opacity-50" />
+                                  <span>{readableReasonLabel(reason, column.player)}</span>
+                                </li>
+                              ))}
+                            </ul>
+                          ) : (
+                            <p className="mt-2 text-sm text-slate-500">No standout details found.</p>
+                          )}
+                        </section>
+                      );
+                    })}
+                  </div>
+                  {matchReasons.length ? (
+                    <section className="rounded-md border border-white/10 bg-white/[0.025] px-3 py-2.5">
+                      <h3 className="text-xs font-bold uppercase tracking-wide text-slate-400">Match context</h3>
+                      <ul className="mt-1.5 grid gap-x-5 gap-y-1 text-sm text-slate-300 md:grid-cols-2">
+                        {matchReasons.map((reason) => (
+                          <li key={`${reason.type}-${reason.label}`} className="flex gap-2">
+                            <span className="mt-[0.55rem] h-1 w-1 shrink-0 rounded-full bg-current opacity-50" />
+                            <span>{readableReasonLabel(reason)}</span>
+                          </li>
+                        ))}
+                      </ul>
+                    </section>
+                  ) : null}
+                  {expanded || hiddenReasonCount > 0 ? (
                     <button
                       type="button"
                       onClick={() => setExpanded((next) => !next)}
@@ -270,7 +436,7 @@ export function GameCard({
                         </>
                       ) : (
                         <>
-                          Show {displayReasons.length - COLLAPSED_REASON_COUNT} more
+                          Show {hiddenReasonCount} more
                           <ChevronDown className="h-3.5 w-3.5" />
                         </>
                       )}

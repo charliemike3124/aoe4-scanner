@@ -11,7 +11,7 @@ export default function GamesPage() {
         <header className="space-y-3">
           <h1 className="text-4xl font-black text-white">Outlier game archive</h1>
           <p className="max-w-2xl text-slate-300">
-            Browse recent standout matches the scanner has found, then filter by player, civilization, map, or recency to find games worth studying.
+            Browse recent standout matches the scanner has found, then filter by anything you want.
           </p>
         </header>
 

@@ -7,6 +7,11 @@ service cloud.firestore {
       allow write: if false;
     }
 
+    match /playerCivilizationMains/{profileId} {
+      allow read: if true;
+      allow write: if false;
+    }
+
     match /scanRuns/{runId} {
       allow read: if true;
       allow write: if false;
