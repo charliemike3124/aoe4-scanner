@@ -41,8 +41,9 @@ const PRIMARY_LOOKBACK_HOURS = 6;
 const ARCHIVE_SNAPSHOT_LIMIT = 200;
 const PUBLIC_META_QUERY_LIMIT = 250;
 const AGEUP_STATS_MAX_AGE_DAYS = 10;
-const AGEUP_STATS_SCHEMA_VERSION = 3;
+const AGEUP_STATS_SCHEMA_VERSION = 4;
 const AGEUP_ANALYTICS_KIND = "rm_solo";
+const RARE_LANDMARK_MAX_PICK_RATE = 40;
 const CIVILIZATION_MAIN_PICK_RATE = 35;
 const CIVILIZATION_MAIN_MIN_GAMES = 20;
 const CIVILIZATION_MAIN_HIGH_PICK_RATE = 75;
@@ -878,12 +879,16 @@ function scoreRareAgeupPath(
   }
   if (!best) return;
 
+  if (best.pickRate >= RARE_LANDMARK_MAX_PICK_RATE) return;
+
   let weight = 0;
   if (best.pickRate <= 3) weight = 38;
   else if (best.pickRate <= 6) weight = 30;
   else if (best.pickRate <= 10) weight = 24;
   else if (best.pickRate <= 15) weight = 18;
   else if (best.pickRate <= 20) weight = 12;
+  else if (best.pickRate <= 30) weight = 8;
+  else weight = 4;
   if (!weight) return;
 
   if (best.winRate < 48) weight += 6;
@@ -1405,10 +1410,13 @@ async function fetchCurrentAgeupStats() {
         const civilization = normalizeCivilizationKey(stringValue(item.civilization)) ?? defaultCivilization;
         const playerGamesCount = intValue(item.player_games_count, item.playerGamesCount) ?? 0;
         if (!civilization || playerGamesCount <= 0) continue;
-        totalsByCivilization.set(civilization, (totalsByCivilization.get(civilization) ?? 0) + playerGamesCount);
         const pbgid = intValue(item[section.pbgidKey], item[section.pbgidCamelKey]);
         const label = stringValue(item[section.nameKey], item[section.nameCamelKey]);
         if (pbgid != null && label) {
+          // The API includes rows for players who never reached this age. Landmark
+          // pick rates are conditional on making an age-up choice, so only rows
+          // with a landmark at the section's target age belong in the denominator.
+          totalsByCivilization.set(civilization, (totalsByCivilization.get(civilization) ?? 0) + playerGamesCount);
           const key = ageupPathKey(civilization, [pbgid]);
           const group = landmarkGroups.get(key) ?? { civilization, pbgid, label, playerGamesCount: 0, weightedWins: 0 };
           const winCount = intValue(item.win_count, item.winCount);
@@ -1498,7 +1506,15 @@ async function fetchCurrentAgeupStats() {
         if (playerGamesCount <= 0) continue;
         const totalGames = arrayValue(data[section.key])
           .map(record)
-          .filter((row) => normalizeCivilizationKey(stringValue(row.civilization)) === civilization)
+          .filter((row) => {
+            if (normalizeCivilizationKey(stringValue(row.civilization)) !== civilization) return false;
+            const rowPath = [
+              intValue(row.age2_pbgid, row.age2Pbgid),
+              intValue(row.age3_pbgid, row.age3Pbgid),
+              intValue(row.age4_pbgid, row.age4Pbgid),
+            ].filter((pbgid): pbgid is number => pbgid != null);
+            return rowPath.length === section.pathLength;
+          })
           .reduce((sum, row) => sum + (intValue(row.player_games_count, row.playerGamesCount) ?? 0), 0);
         if (totalGames <= 0) continue;
         const labels = [
