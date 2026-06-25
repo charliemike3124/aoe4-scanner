@@ -2,8 +2,9 @@
 
 import { useEffect, useMemo, useState } from "react";
 import Link from "next/link";
+import Image from "next/image";
 import { useRouter, useSearchParams } from "next/navigation";
-import { collection, getDocs, limit, orderBy, query, type Timestamp } from "firebase/firestore";
+import { collection, doc, getDoc, getDocs, limit, orderBy, query, type Timestamp } from "firebase/firestore";
 import { ExternalLink, Gamepad2, LinkIcon, Twitch, Youtube } from "lucide-react";
 import { CIVILIZATION_FLAGS, CIVILIZATIONS, type Civilization } from "@/lib/aoe4/civilizations";
 import { formatCivilization } from "@/lib/format";
@@ -30,6 +31,9 @@ type MainPlayer = {
   latestMatchAt: Date | null;
 };
 
+const DIRECTORY_CACHE_KEY = "aoe4scanner:civilization-mains:v1";
+const DIRECTORY_CACHE_TTL_MS = 6 * 60 * 60 * 1000;
+
 function dateValue(value: Timestamp | Date | string | null | undefined) {
   if (!value) return null;
   if (value instanceof Date) return value;
@@ -39,6 +43,66 @@ function dateValue(value: Timestamp | Date | string | null | undefined) {
 
 function numberValue(value: unknown) {
   return typeof value === "number" && Number.isFinite(value) ? value : null;
+}
+
+function mainPlayerFromData(data: Record<string, unknown>, fallbackId: string): MainPlayer | null {
+  const main = data.main as Record<string, unknown> | null | undefined;
+  if (!main?.civilization || typeof main.pickRate !== "number" || typeof main.gamesCount !== "number") return null;
+  return {
+    profileId: String(data.profileId ?? fallbackId),
+    name: String(data.name ?? `Player ${fallbackId}`),
+    civilization: typeof data.civilization === "string" ? data.civilization : null,
+    rating: numberValue(data.rating),
+    mmr: numberValue(data.mmr),
+    inputType: typeof data.inputType === "string" ? data.inputType : null,
+    social: data.social && typeof data.social === "object" ? (data.social as Record<string, string>) : {},
+    main: {
+      civilization: String(main.civilization),
+      pickRate: Number(main.pickRate),
+      gamesCount: Number(main.gamesCount),
+      winRate: numberValue(main.winRate),
+    },
+    lastSeenAt: dateValue((data.lastSeenAt ?? data.refreshedAt) as Timestamp | Date | string | null | undefined),
+    archivedMatches: 0,
+    latestMatchAt: null,
+  };
+}
+
+function readCachedDirectory() {
+  try {
+    const raw = localStorage.getItem(DIRECTORY_CACHE_KEY);
+    if (!raw) return null;
+    const cached = JSON.parse(raw) as {
+      storedAt: number;
+      players: Array<Omit<MainPlayer, "lastSeenAt" | "latestMatchAt"> & { lastSeenAt: string | null }>;
+    };
+    if (Date.now() - cached.storedAt > DIRECTORY_CACHE_TTL_MS) return null;
+    return cached.players.map((player) => ({
+      ...player,
+      lastSeenAt: player.lastSeenAt ? new Date(player.lastSeenAt) : null,
+      latestMatchAt: null,
+    }));
+  } catch {
+    return null;
+  }
+}
+
+function cacheDirectory(players: MainPlayer[]) {
+  try {
+    localStorage.setItem(
+      DIRECTORY_CACHE_KEY,
+      JSON.stringify({
+        storedAt: Date.now(),
+        players: players.map((player) => ({
+          ...player,
+          lastSeenAt: player.lastSeenAt?.toISOString() ?? null,
+          latestMatchAt: null,
+        })),
+      }),
+    );
+  } catch {
+    // Browser storage is an optional optimization.
+  }
 }
 
 function socialIcon(key: string, url: string) {
@@ -68,10 +132,7 @@ function mergePlayer(current: MainPlayer | undefined, next: MainPlayer): MainPla
     inputType: next.inputType ?? current.inputType,
     social: { ...current.social, ...next.social },
     main: next.main.gamesCount >= current.main.gamesCount ? next.main : current.main,
-    lastSeenAt:
-      next.lastSeenAt && (!current.lastSeenAt || next.lastSeenAt > current.lastSeenAt)
-        ? next.lastSeenAt
-        : current.lastSeenAt,
+    lastSeenAt: next.lastSeenAt && (!current.lastSeenAt || next.lastSeenAt > current.lastSeenAt) ? next.lastSeenAt : current.lastSeenAt,
     archivedMatches: current.archivedMatches + next.archivedMatches,
     latestMatchAt:
       next.latestMatchAt && (!current.latestMatchAt || next.latestMatchAt > current.latestMatchAt)
@@ -86,11 +147,7 @@ function MainPlayerCard({ player }: { player: MainPlayer }) {
     <article className="rounded-lg border border-white/10 bg-slate-950/70 p-4 shadow-lg shadow-black/20">
       <div className="flex items-start justify-between gap-3">
         <div className="min-w-0">
-          <Link
-            href={profileUrl}
-            target="_blank"
-            className="block truncate text-lg font-bold text-white transition hover:text-sky-200"
-          >
+          <Link href={profileUrl} target="_blank" className="block truncate text-lg font-bold text-white transition hover:text-sky-200">
             {player.name}
           </Link>
           <div className="mt-1 flex flex-wrap items-center gap-2 text-xs text-slate-400">
@@ -99,7 +156,7 @@ function MainPlayerCard({ player }: { player: MainPlayer }) {
             {player.inputType ? <span>{player.inputType}</span> : null}
           </div>
         </div>
-        <img
+        <Image
           src={CIVILIZATION_FLAGS[player.main.civilization as Civilization]}
           alt=""
           width={44}
@@ -212,6 +269,28 @@ export function CivilizationMainsDirectory() {
 
     async function loadPlayers() {
       try {
+        const cachedPlayers = readCachedDirectory();
+        if (cachedPlayers?.length) {
+          if (active) {
+            setPlayers(cachedPlayers);
+            setLoading(false);
+          }
+          return;
+        }
+
+        const publicSnapshot = await getDoc(doc(db, "meta", "civilizationMainsSnapshot")).catch(() => null);
+        const snapshotPlayers =
+          publicSnapshot?.exists() && Array.isArray(publicSnapshot.data().players)
+            ? (publicSnapshot.data().players as Record<string, unknown>[])
+                .map((data, index) => mainPlayerFromData(data, String(index)))
+                .filter((player): player is MainPlayer => Boolean(player))
+            : [];
+        if (snapshotPlayers.length) {
+          cacheDirectory(snapshotPlayers);
+          if (active) setPlayers(snapshotPlayers);
+          return;
+        }
+
         const [directorySnapshot, archiveSnapshot] = await Promise.all([
           getDocs(collection(db, "playerCivilizationMains")).catch(() => null),
           getDocs(query(collection(db, "outlierGames"), orderBy("startedAt", "desc"), limit(250))).catch(() => null),
@@ -221,26 +300,8 @@ export function CivilizationMainsDirectory() {
 
         directorySnapshot?.docs.forEach((document) => {
           const data = document.data();
-          const main = data.main;
-          if (!main?.civilization || typeof main.pickRate !== "number" || typeof main.gamesCount !== "number") return;
-          const player: MainPlayer = {
-            profileId: String(data.profileId ?? document.id),
-            name: String(data.name ?? `Player ${document.id}`),
-            civilization: typeof data.civilization === "string" ? data.civilization : null,
-            rating: numberValue(data.rating),
-            mmr: numberValue(data.mmr),
-            inputType: typeof data.inputType === "string" ? data.inputType : null,
-            social: data.social && typeof data.social === "object" ? data.social : {},
-            main: {
-              civilization: String(main.civilization),
-              pickRate: Number(main.pickRate),
-              gamesCount: Number(main.gamesCount),
-              winRate: numberValue(main.winRate),
-            },
-            lastSeenAt: dateValue(data.lastSeenAt ?? data.refreshedAt),
-            archivedMatches: 0,
-            latestMatchAt: null,
-          };
+          const player = mainPlayerFromData(data, document.id);
+          if (!player) return;
           merged.set(player.profileId, mergePlayer(merged.get(player.profileId), player));
         });
 
@@ -252,7 +313,12 @@ export function CivilizationMainsDirectory() {
             const main = rawPlayer.civilizationMain;
             if (!main || typeof main !== "object") return;
             const mainData = main as Record<string, unknown>;
-            if (typeof mainData.civilization !== "string" || typeof mainData.pickRate !== "number" || typeof mainData.gamesCount !== "number") return;
+            if (
+              typeof mainData.civilization !== "string" ||
+              typeof mainData.pickRate !== "number" ||
+              typeof mainData.gamesCount !== "number"
+            )
+              return;
             const profileId = String(rawPlayer.profileId ?? "");
             if (!profileId) return;
             const player: MainPlayer = {
@@ -262,7 +328,7 @@ export function CivilizationMainsDirectory() {
               rating: numberValue(rawPlayer.rating),
               mmr: numberValue(rawPlayer.mmr),
               inputType: typeof rawPlayer.inputType === "string" ? rawPlayer.inputType : null,
-              social: rawPlayer.social && typeof rawPlayer.social === "object" ? rawPlayer.social as Record<string, string> : {},
+              social: rawPlayer.social && typeof rawPlayer.social === "object" ? (rawPlayer.social as Record<string, string>) : {},
               main: {
                 civilization: mainData.civilization,
                 pickRate: mainData.pickRate,
@@ -277,7 +343,9 @@ export function CivilizationMainsDirectory() {
           });
         });
 
-        if (active) setPlayers(Array.from(merged.values()));
+        const nextPlayers = Array.from(merged.values());
+        cacheDirectory(nextPlayers);
+        if (active) setPlayers(nextPlayers);
       } catch (loadError) {
         console.error(loadError);
         if (active) setError("Could not load civilization mains right now.");
@@ -331,15 +399,12 @@ export function CivilizationMainsDirectory() {
                   aria-label={`Show ${formatCivilization(civilization)} mains`}
                   aria-pressed={selected}
                 >
-                  <img
+                  <Image
                     src={CIVILIZATION_FLAGS[civilization]}
                     alt=""
                     width={32}
                     height={32}
-                    className={cn(
-                      "relative z-10 h-8 w-8 rounded-full object-cover",
-                      selected && "ring-2 ring-amber-100/90",
-                    )}
+                    className={cn("relative z-10 h-8 w-8 rounded-full object-cover", selected && "ring-2 ring-amber-100/90")}
                   />
                 </button>
               </Tooltip>
@@ -351,7 +416,7 @@ export function CivilizationMainsDirectory() {
       <div className="flex flex-wrap items-end justify-between gap-3">
         <div>
           <div className="flex items-center gap-2">
-            <img
+            <Image
               src={CIVILIZATION_FLAGS[selectedCivilization]}
               alt=""
               width={28}

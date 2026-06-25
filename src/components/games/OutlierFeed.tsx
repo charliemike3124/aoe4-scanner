@@ -364,7 +364,7 @@ export function OutlierFeed({
         );
         setGames(nextGames);
         setStatus(nextStatus);
-      } catch (caught) {
+      } catch {
         if (!cancelled)
           setError('The archive could not load right now. Try refreshing the page in a moment.');
       } finally {

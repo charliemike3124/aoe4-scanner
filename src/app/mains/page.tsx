@@ -4,13 +4,22 @@ import { AppNav } from "@/components/AppNav";
 import { CivilizationMainsDirectory } from "@/components/mains/CivilizationMainsDirectory";
 
 export const metadata: Metadata = {
-  title: "Find Civilization Mains | AOE4Scanner",
+  title: "Find Civilization Mains",
   description: "Find high-level Age of Empires IV players who specialize in each civilization.",
+  alternates: { canonical: "/mains" },
+  openGraph: {
+    url: "/mains",
+    title: "Find AOE4 Civilization Mains",
+    description: "Find experienced high-level players who specialize in each Age of Empires IV civilization.",
+  },
 };
 
 export default function CivilizationMainsPage() {
   return (
-    <main className="min-h-screen bg-[radial-gradient(circle_at_top_right,rgba(245,183,59,0.1),transparent_30%),linear-gradient(180deg,#030712_0%,#07111f_60%,#030712_100%)]">
+    <main
+      id="main-content"
+      className="min-h-screen bg-[radial-gradient(circle_at_top_right,rgba(245,183,59,0.1),transparent_30%),linear-gradient(180deg,#030712_0%,#07111f_60%,#030712_100%)]"
+    >
       <section className="mx-auto flex w-full max-w-[1080px] flex-col gap-8 px-4 py-8 sm:px-6 lg:px-8">
         <AppNav />
 

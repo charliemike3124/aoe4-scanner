@@ -14,6 +14,7 @@ const SCAN_STATE_DOC = db.collection("meta").doc("scanState");
 const SCAN_LOCK_DOC = db.collection("meta").doc("scanLock");
 const PUBLIC_STATUS_DOC = db.collection("meta").doc("publicStatus");
 const ARCHIVE_SNAPSHOT_DOC = db.collection("meta").doc("archiveSnapshot");
+const CIVILIZATION_MAINS_SNAPSHOT_DOC = db.collection("meta").doc("civilizationMainsSnapshot");
 const MAP_POOL_DOC = db.collection("meta").doc("mapPool");
 const AGEUP_STATS_DOC = db.collection("meta").doc("ageupStats");
 const PLAYER_CIVILIZATION_MAIN_COLLECTION = db.collection("playerCivilizationMains");
@@ -39,6 +40,7 @@ const CANDIDATE_LOOKBACK_HOURS = 12;
 const IGNORED_GAME_TTL_HOURS = 24;
 const PRIMARY_LOOKBACK_HOURS = 6;
 const ARCHIVE_SNAPSHOT_LIMIT = 200;
+const CIVILIZATION_MAINS_SNAPSHOT_LIMIT = 1000;
 const PUBLIC_META_QUERY_LIMIT = 250;
 const AGEUP_STATS_MAX_AGE_DAYS = 10;
 const AGEUP_STATS_SCHEMA_VERSION = 4;
@@ -184,7 +186,12 @@ const TEMPO_CIVS = new Set(["french", "mongols", "english", "jeanne_darc", "otto
 const mapCivStatCache = new Map<string, CivStat | null>();
 
 function normalizeCivilizationKey(value: string | null) {
-  return value?.toLowerCase().replace(/[^a-z0-9]+/g, "_").replace(/^_+|_+$/g, "") ?? null;
+  return (
+    value
+      ?.toLowerCase()
+      .replace(/[^a-z0-9]+/g, "_")
+      .replace(/^_+|_+$/g, "") ?? null
+  );
 }
 
 function formatCivilizationName(value: string | null) {
@@ -548,41 +555,100 @@ function scoreGame(game: AoeGame, civStats: Map<string, CivStat>, eliteCivStats 
     };
 
     if (eliteWeight) {
-      addReason(reasons, tags, "elite_match", `Elite match with both players at ${minimumPlayerMmr(game)}+ MMR`, eliteWeight, "Elite match");
+      addReason(
+        reasons,
+        tags,
+        "elite_match",
+        `Elite match with both players at ${minimumPlayerMmr(game)}+ MMR`,
+        eliteWeight,
+        "Elite match",
+      );
     }
     if (winner.mmr != null && loser.mmr != null && winner.mmr < loser.mmr) {
       const diff = loser.mmr - winner.mmr;
       const upsetWeight = mmrUpsetWeight(diff);
       const winnerLabel = `${winner.name} (${formatCivilizationName(winner.civilization)})`;
-      if (diff >= 350) addReason(reasons, tags, "insane_mmr_upset", `${winnerLabel} won while down ${diff} MMR`, upsetWeight, "Insane upset");
-      else if (diff >= 250) addReason(reasons, tags, "strong_mmr_upset", `${winnerLabel} won while down ${diff} MMR`, upsetWeight, "Strong upset");
-      else if (diff >= 200) addReason(reasons, tags, "major_mmr_upset", `${winnerLabel} won while down ${diff} MMR`, upsetWeight, "Major upset");
+      if (diff >= 350)
+        addReason(reasons, tags, "insane_mmr_upset", `${winnerLabel} won while down ${diff} MMR`, upsetWeight, "Insane upset");
+      else if (diff >= 250)
+        addReason(reasons, tags, "strong_mmr_upset", `${winnerLabel} won while down ${diff} MMR`, upsetWeight, "Strong upset");
+      else if (diff >= 200)
+        addReason(reasons, tags, "major_mmr_upset", `${winnerLabel} won while down ${diff} MMR`, upsetWeight, "Major upset");
       else if (upsetWeight) addReason(reasons, tags, "mmr_upset", `${winnerLabel} won while down ${diff} MMR`, upsetWeight, "MMR upset");
       const lowRatedBonus = lowRatedUpsetBonus(winner.mmr);
       if (lowRatedBonus) {
-        addReason(reasons, tags, "low_rated_underdog_bonus", `${winnerLabel} won as a ${winner.mmr} MMR underdog`, lowRatedBonus, "Low-rated upset");
+        addReason(
+          reasons,
+          tags,
+          "low_rated_underdog_bonus",
+          `${winnerLabel} won as a ${winner.mmr} MMR underdog`,
+          lowRatedBonus,
+          "Low-rated upset",
+        );
       }
     }
     if (loser.mmr != null && loser.mmr >= 2150 && winner.mmr != null && winner.mmr < loser.mmr) {
-      addReason(reasons, tags, "elite_opponent", `${winner.name} (${formatCivilizationName(winner.civilization)}) beat an elite opponent (${loser.name})`, 14, "Elite opponent");
+      addReason(
+        reasons,
+        tags,
+        "elite_opponent",
+        `${winner.name} (${formatCivilizationName(winner.civilization)}) beat an elite opponent (${loser.name})`,
+        14,
+        "Elite opponent",
+      );
     }
     if (winnerStat) {
       if (winnerStat.winRate < 46) {
-        addReason(reasons, tags, "very_low_winrate_civ_win", `${winner.civilization} has ${winnerStat.winRate.toFixed(1)}% overall win rate${statContext}`, 24, "Low win-rate civ");
+        addReason(
+          reasons,
+          tags,
+          "very_low_winrate_civ_win",
+          `${winner.civilization} has ${winnerStat.winRate.toFixed(1)}% overall win rate${statContext}`,
+          24,
+          "Low win-rate civ",
+        );
       } else if (winnerStat.winRate < 48) {
-        addReason(reasons, tags, "low_winrate_civ_win", `${winner.civilization} has ${winnerStat.winRate.toFixed(1)}% overall win rate${statContext}`, 16, "Low win-rate civ");
+        addReason(
+          reasons,
+          tags,
+          "low_winrate_civ_win",
+          `${winner.civilization} has ${winnerStat.winRate.toFixed(1)}% overall win rate${statContext}`,
+          16,
+          "Low win-rate civ",
+        );
       }
       if (eliteWeight && winnerStat.winRate < 48) {
-        addReason(reasons, tags, "elite_low_winrate_civ_bonus", `Elite win with a ${winnerStat.winRate.toFixed(1)}% overall win-rate civilization at 1700+ Elo`, 8, "Elite civ angle");
+        addReason(
+          reasons,
+          tags,
+          "elite_low_winrate_civ_bonus",
+          `Elite win with a ${winnerStat.winRate.toFixed(1)}% overall win-rate civilization at 1700+ Elo`,
+          8,
+          "Elite civ angle",
+        );
       }
     }
   }
 
   if (winner?.civilization && game.durationSeconds != null && SCALING_CIVS.has(winner.civilization) && game.durationSeconds <= 12 * 60) {
-    addReason(reasons, tags, "short_scaling_civ_win", `${winner.civilization} won in ${Math.round(game.durationSeconds / 60)} minutes`, 18, "Fast scaling win");
+    addReason(
+      reasons,
+      tags,
+      "short_scaling_civ_win",
+      `${winner.civilization} won in ${Math.round(game.durationSeconds / 60)} minutes`,
+      18,
+      "Fast scaling win",
+    );
   }
   if (winner?.civilization && game.durationSeconds != null && TEMPO_CIVS.has(winner.civilization) && game.durationSeconds >= 45 * 60) {
-    addReason(reasons, tags, "long_tempo_civ_win", `${winner.civilization} won a ${Math.round(game.durationSeconds / 60)} minute game`, 18, "Late tempo win");
+    addReason(
+      reasons,
+      tags,
+      "long_tempo_civ_win",
+      `${winner.civilization} won a ${Math.round(game.durationSeconds / 60)} minute game`,
+      18,
+      "Late tempo win",
+    );
   }
   if (game.durationSeconds != null && game.durationSeconds <= 11 * 60 && reasons.some((reason) => reason.type.includes("upset"))) {
     addReason(reasons, tags, "fast_upset", "Upset finished in under 11 minutes", 12, "Fast upset");
@@ -603,7 +669,12 @@ function scoreCandidates(games: AoeGame[], civStats: Map<string, CivStat>, elite
     .sort((a, b) => b.score - a.score || b.game.startedAt.getTime() - a.game.startedAt.getTime());
 }
 
-function eliteSummaryProbeCandidates(games: AoeGame[], civStats: Map<string, CivStat>, eliteCivStats: Map<string, CivStat>, scored: ScoredCandidate[]) {
+function eliteSummaryProbeCandidates(
+  games: AoeGame[],
+  civStats: Map<string, CivStat>,
+  eliteCivStats: Map<string, CivStat>,
+  scored: ScoredCandidate[],
+) {
   const scoredIds = new Set(scored.map((candidate) => candidate.game.aoe4worldGameId));
   return games
     .map((game) => ({ game, ...scoreGame(game, civStats, eliteCivStats) }))
@@ -761,10 +832,12 @@ function valueAt(values: number[], index: number) {
 }
 
 function villagerCountAt(player: AnyRecord, timestamp: number) {
-  const villagerEntries = arrayValue(player.buildOrder).map(record).filter((entry) => {
-    const icon = stringValue(entry.icon) ?? "";
-    return stringValue(entry.type) === "Unit" && icon.includes("villager");
-  });
+  const villagerEntries = arrayValue(player.buildOrder)
+    .map(record)
+    .filter((entry) => {
+      const icon = stringValue(entry.icon) ?? "";
+      return stringValue(entry.type) === "Unit" && icon.includes("villager");
+    });
   if (!villagerEntries.length) return null;
   const created = villagerEntries.reduce((sum, entry) => sum + numberArray(entry.finished).filter((time) => time <= timestamp).length, 0);
   const lost = villagerEntries.reduce((sum, entry) => sum + numberArray(entry.destroyed).filter((time) => time <= timestamp).length, 0);
@@ -837,9 +910,10 @@ function ageupPath(playerSummary: AnyRecord) {
       name: stringValue(landmark.name),
       newAge: intValue(landmark.newAge, landmark.new_age),
     }))
-    .filter((landmark): landmark is { pbgid: number; name: string; newAge: number } => (
-      landmark.pbgid != null && landmark.name != null && landmark.newAge != null && landmark.newAge >= 2
-    ))
+    .filter(
+      (landmark): landmark is { pbgid: number; name: string; newAge: number } =>
+        landmark.pbgid != null && landmark.name != null && landmark.newAge != null && landmark.newAge >= 2,
+    )
     .sort((a, b) => a.newAge - b.newAge);
 }
 
@@ -917,7 +991,9 @@ const NOTABLE_UNIT_COMMITMENTS = [
 ] as const;
 
 function scoreNotableUnitCommitments(candidate: ScoredCandidate, player: AoePlayer, playerSummary: AnyRecord, subject: string) {
-  const unitEntries = arrayValue(playerSummary.buildOrder).map(record).filter((entry) => stringValue(entry.type) === "Unit");
+  const unitEntries = arrayValue(playerSummary.buildOrder)
+    .map(record)
+    .filter((entry) => stringValue(entry.type) === "Unit");
   for (const commitment of NOTABLE_UNIT_COMMITMENTS) {
     const count = unitEntries.reduce((total, entry) => {
       const icon = (stringValue(entry.icon) ?? "").toLowerCase();
@@ -948,38 +1024,86 @@ function analyzePlayerStrategy(
 
   const castleTime = actionTime(playerSummary, "castleAge");
   if (castleTime != null && castleTime < 10 * 60 && (candidate.game.durationSeconds ?? 0) >= 20 * 60) {
-    addSummaryReason(candidate, summaryReasonType("summary_fast_castle", player), `${subject} reached Castle Age at ${formatGameTime(castleTime)}`, 6, "Fast Castle", player);
+    addSummaryReason(
+      candidate,
+      summaryReasonType("summary_fast_castle", player),
+      `${subject} reached Castle Age at ${formatGameTime(castleTime)}`,
+      6,
+      "Fast Castle",
+      player,
+    );
   }
   const imperialTime = actionTime(playerSummary, "imperialAge");
   if (imperialTime != null && imperialTime < 20 * 60) {
-    addSummaryReason(candidate, summaryReasonType("summary_fast_imperial", player), `${subject} reached Imperial Age at ${formatGameTime(imperialTime)}`, 10, "Fast Imperial", player);
+    addSummaryReason(
+      candidate,
+      summaryReasonType("summary_fast_imperial", player),
+      `${subject} reached Imperial Age at ${formatGameTime(imperialTime)}`,
+      10,
+      "Fast Imperial",
+      player,
+    );
   }
   const feudalTime = actionTime(playerSummary, "feudalAge");
   if (feudalTime != null && feudalTime >= 420) {
-    addSummaryReason(candidate, summaryReasonType("summary_late_feudal", player), `${subject} delayed Feudal Age until ${formatGameTime(feudalTime)}`, 8, "Odd timing", player);
+    addSummaryReason(
+      candidate,
+      summaryReasonType("summary_late_feudal", player),
+      `${subject} delayed Feudal Age until ${formatGameTime(feudalTime)}`,
+      8,
+      "Odd timing",
+      player,
+    );
   }
 
   const firstMilitary = firstMilitaryProductionTime(playerSummary);
   const darkAgeSpearman = productionTimes(playerSummary, "Unit", ["spearman"]).find((time) => time < (feudalTime ?? 5 * 60));
   if (darkAgeSpearman != null) {
-    addSummaryReason(candidate, summaryReasonType("summary_dark_age_aggression", player), `${subject} opened with Dark Age spearman pressure at ${formatGameTime(darkAgeSpearman)}`, 12, "Dark age pressure", player);
+    addSummaryReason(
+      candidate,
+      summaryReasonType("summary_dark_age_aggression", player),
+      `${subject} opened with Dark Age spearman pressure at ${formatGameTime(darkAgeSpearman)}`,
+      12,
+      "Dark age pressure",
+      player,
+    );
   } else if (firstMilitary != null && firstMilitary <= 180) {
-    addSummaryReason(candidate, summaryReasonType("summary_dark_age_aggression", player), `${subject} produced military before 3 minutes`, 12, "Dark age pressure", player);
+    addSummaryReason(
+      candidate,
+      summaryReasonType("summary_dark_age_aggression", player),
+      `${subject} produced military before 3 minutes`,
+      12,
+      "Dark age pressure",
+      player,
+    );
   } else if (firstMilitary != null && firstMilitary >= 600 && (candidate.game.durationSeconds ?? 0) >= 18 * 60) {
-    addSummaryReason(candidate, summaryReasonType("summary_delayed_military", player), `${subject}'s first military unit came after 10 minutes`, 12, "Odd build", player);
+    addSummaryReason(
+      candidate,
+      summaryReasonType("summary_delayed_military", player),
+      `${subject}'s first military unit came after 10 minutes`,
+      12,
+      "Odd build",
+      player,
+    );
   }
 
   const ramTimes = productionTimes(playerSummary, "Unit", ["/ram", "units/ram"]);
   const firstFeudalRam = ramTimes.find((time) => time >= (feudalTime ?? 0) && time < (castleTime ?? 16 * 60));
   if (firstFeudalRam != null) {
-    addSummaryReason(candidate, summaryReasonType("strategy_feudal_rams", player), `${subject} started Feudal Age ram pressure at ${formatGameTime(firstFeudalRam)}`, 8, "Feudal rams", player);
+    addSummaryReason(
+      candidate,
+      summaryReasonType("strategy_feudal_rams", player),
+      `${subject} started Feudal Age ram pressure at ${formatGameTime(firstFeudalRam)}`,
+      8,
+      "Feudal rams",
+      player,
+    );
   }
 
   const feudalMilitaryEnd = castleTime ?? candidate.game.durationSeconds ?? 0;
   const delayedCastle = castleTime == null ? feudalMilitaryEnd >= 12 * 60 : castleTime > 12 * 60;
-  const feudalMilitaryCount = feudalTime != null && delayedCastle
-    ? militaryProductionCountBetween(playerSummary, feudalTime, feudalMilitaryEnd)
-    : 0;
+  const feudalMilitaryCount =
+    feudalTime != null && delayedCastle ? militaryProductionCountBetween(playerSummary, feudalTime, feudalMilitaryEnd) : 0;
   if (feudalMilitaryCount >= 18) {
     const castleText = castleTime == null ? "did not reach Castle Age" : `delayed Castle Age until ${formatGameTime(castleTime)}`;
     addSummaryReason(
@@ -992,9 +1116,18 @@ function analyzePlayerStrategy(
     );
   }
 
-  const darkAgeTower = productionTimes(playerSummary, "Building", ["outpost", "watch_tower", "tower"]).find((time) => time < (feudalTime ?? 5 * 60));
+  const darkAgeTower = productionTimes(playerSummary, "Building", ["outpost", "watch_tower", "tower"]).find(
+    (time) => time < (feudalTime ?? 5 * 60),
+  );
   if (darkAgeTower != null) {
-    addSummaryReason(candidate, summaryReasonType("strategy_dark_age_tower_rush", player), `${subject} started a Dark Age tower rush at ${formatGameTime(darkAgeTower)}`, 8, "Dark age tower rush", player);
+    addSummaryReason(
+      candidate,
+      summaryReasonType("strategy_dark_age_tower_rush", player),
+      `${subject} started a Dark Age tower rush at ${formatGameTime(darkAgeTower)}`,
+      8,
+      "Dark age tower rush",
+      player,
+    );
   }
 
   const extraTownCenterTimes = constructedBuildingTimes(playerSummary, [
@@ -1057,9 +1190,23 @@ function analyzeSummary(candidate: ScoredCandidate, summary: unknown, ageupStats
       maxScoreDeficit = Math.max(maxScoreDeficit, (loserScore - winnerScore) / loserScore);
     }
     if (maxScoreDeficit >= 0.3) {
-      addSummaryReason(candidate, "summary_huge_score_comeback", `${winnerLabel} was behind by ${Math.round(maxScoreDeficit * 100)}% score after 10 minutes`, 34, "Huge comeback", winner);
+      addSummaryReason(
+        candidate,
+        "summary_huge_score_comeback",
+        `${winnerLabel} was behind by ${Math.round(maxScoreDeficit * 100)}% score after 10 minutes`,
+        34,
+        "Huge comeback",
+        winner,
+      );
     } else if (maxScoreDeficit >= 0.2) {
-      addSummaryReason(candidate, "summary_score_comeback", `${winnerLabel} was behind by ${Math.round(maxScoreDeficit * 100)}% score after 10 minutes`, 22, "Comeback", winner);
+      addSummaryReason(
+        candidate,
+        "summary_score_comeback",
+        `${winnerLabel} was behind by ${Math.round(maxScoreDeficit * 100)}% score after 10 minutes`,
+        22,
+        "Comeback",
+        winner,
+      );
     }
 
     let maxVillagerDeficit = 0;
@@ -1070,11 +1217,32 @@ function analyzeSummary(candidate: ScoredCandidate, summary: unknown, ageupStats
       maxVillagerDeficit = Math.max(maxVillagerDeficit, loserVillagers - winnerVillagers);
     }
     if (maxVillagerDeficit >= 30) {
-      addSummaryReason(candidate, "summary_insane_villager_deficit", `${winnerLabel} was down ${maxVillagerDeficit} villagers`, 38, "Huge vill deficit", winner);
+      addSummaryReason(
+        candidate,
+        "summary_insane_villager_deficit",
+        `${winnerLabel} was down ${maxVillagerDeficit} villagers`,
+        38,
+        "Huge vill deficit",
+        winner,
+      );
     } else if (maxVillagerDeficit >= 20) {
-      addSummaryReason(candidate, "summary_huge_villager_deficit", `${winnerLabel} was down ${maxVillagerDeficit} villagers`, 28, "Villager deficit", winner);
+      addSummaryReason(
+        candidate,
+        "summary_huge_villager_deficit",
+        `${winnerLabel} was down ${maxVillagerDeficit} villagers`,
+        28,
+        "Villager deficit",
+        winner,
+      );
     } else if (maxVillagerDeficit >= 10) {
-      addSummaryReason(candidate, "summary_villager_deficit", `${winnerLabel} was down ${maxVillagerDeficit} villagers`, 18, "Villager deficit", winner);
+      addSummaryReason(
+        candidate,
+        "summary_villager_deficit",
+        `${winnerLabel} was down ${maxVillagerDeficit} villagers`,
+        18,
+        "Villager deficit",
+        winner,
+      );
     }
 
     const winnerResources = resourceTotal(winnerSummary.totalResourcesGathered);
@@ -1082,9 +1250,23 @@ function analyzeSummary(candidate: ScoredCandidate, summary: unknown, ageupStats
     if (winnerResources > 0 && loserResources > 0 && winnerResources < loserResources) {
       const deficit = (loserResources - winnerResources) / loserResources;
       if (deficit >= 0.25) {
-        addSummaryReason(candidate, "summary_huge_resource_deficit", `${winnerLabel} gathered ${Math.round(deficit * 100)}% fewer resources`, 30, "Resource deficit", winner);
+        addSummaryReason(
+          candidate,
+          "summary_huge_resource_deficit",
+          `${winnerLabel} gathered ${Math.round(deficit * 100)}% fewer resources`,
+          30,
+          "Resource deficit",
+          winner,
+        );
       } else if (deficit >= 0.15) {
-        addSummaryReason(candidate, "summary_resource_deficit", `${winnerLabel} gathered ${Math.round(deficit * 100)}% fewer resources`, 20, "Resource deficit", winner);
+        addSummaryReason(
+          candidate,
+          "summary_resource_deficit",
+          `${winnerLabel} gathered ${Math.round(deficit * 100)}% fewer resources`,
+          20,
+          "Resource deficit",
+          winner,
+        );
       }
     }
 
@@ -1093,16 +1275,37 @@ function analyzeSummary(candidate: ScoredCandidate, summary: unknown, ageupStats
     const winnerKills = numberValue(winnerStats.sqkill, winnerStats.ekills) ?? 0;
     const winnerLosses = numberValue(winnerStats.sqlost, winnerStats.edeaths) ?? 0;
     if (winnerKills >= 80 && winnerLosses > 0 && winnerKills / winnerLosses >= 1.5) {
-      addSummaryReason(candidate, "summary_military_efficiency", `${winnerLabel} had ${winnerKills}-${winnerLosses} unit efficiency`, 16, "Military efficiency", winner);
+      addSummaryReason(
+        candidate,
+        "summary_military_efficiency",
+        `${winnerLabel} had ${winnerKills}-${winnerLosses} unit efficiency`,
+        16,
+        "Military efficiency",
+        winner,
+      );
     }
     const loserKills = numberValue(loserStats.sqkill, loserStats.ekills) ?? 0;
     const loserLosses = numberValue(loserStats.sqlost, loserStats.edeaths) ?? 0;
     const loserLabel = loser ? playerSummaryLabel(loser, loserSummary) : "The losing player";
     if (loserKills >= 80 && loserLosses > 0 && loserKills / loserLosses >= 1.5) {
-      addSummaryReason(candidate, "summary_loser_military_efficiency", `${loserLabel} lost despite ${loserKills}-${loserLosses} unit efficiency`, 16, "Efficiency outlier", loser);
+      addSummaryReason(
+        candidate,
+        "summary_loser_military_efficiency",
+        `${loserLabel} lost despite ${loserKills}-${loserLosses} unit efficiency`,
+        16,
+        "Efficiency outlier",
+        loser,
+      );
     }
     if (loserKills > winnerKills && winnerResources < loserResources) {
-      addSummaryReason(candidate, "summary_lower_army_resource_win", `${winnerLabel} won despite lower kills and fewer gathered resources`, 18, "Efficiency outlier", winner);
+      addSummaryReason(
+        candidate,
+        "summary_lower_army_resource_win",
+        `${winnerLabel} won despite lower kills and fewer gathered resources`,
+        18,
+        "Efficiency outlier",
+        winner,
+      );
     }
     if (loserLosses >= 80 && winnerLosses > 0 && loserLosses / winnerLosses >= 1.5) {
       addSummaryReason(candidate, "summary_enemy_bled_units", `${loserLabel} lost ${loserLosses} units`, 10, "Military efficiency", loser);
@@ -1115,7 +1318,14 @@ function analyzeSummary(candidate: ScoredCandidate, summary: unknown, ageupStats
   }
   const landmarkLosses = countDestroyedBuildings(winnerSummary, ["building_landmark", "landmark"]);
   if (landmarkLosses >= 2) {
-    addSummaryReason(candidate, "summary_lost_multiple_landmarks", `${winnerLabel} lost ${landmarkLosses} landmarks and still won`, 28, "Lost landmarks", winner);
+    addSummaryReason(
+      candidate,
+      "summary_lost_multiple_landmarks",
+      `${winnerLabel} lost ${landmarkLosses} landmarks and still won`,
+      28,
+      "Lost landmarks",
+      winner,
+    );
   }
 
   const winReason = stringValue(payload.winReason, payload.win_reason);
@@ -1128,7 +1338,14 @@ function analyzeSummary(candidate: ScoredCandidate, summary: unknown, ageupStats
     const loserApm = numberValue(loserSummary.apm);
     if (winnerApm != null && loserApm != null && winnerApm <= loserApm * 0.65) {
       const opponentLabel = loser ? playerSummaryLabel(loser, loserSummary) : "the opponent";
-      addSummaryReason(candidate, "summary_low_apm_win", `${winnerLabel} had ${winnerApm} APM vs ${opponentLabel}'s ${loserApm}`, 12, "Low APM win", winner);
+      addSummaryReason(
+        candidate,
+        "summary_low_apm_win",
+        `${winnerLabel} had ${winnerApm} APM vs ${opponentLabel}'s ${loserApm}`,
+        12,
+        "Low APM win",
+        winner,
+      );
     }
   }
 }
@@ -1163,7 +1380,9 @@ async function fetchMapCivStat(mapId: number, civilization: string, ratingFilter
     const url = new URL(`${API_BASE}/stats/rm_solo/maps/${mapId}`);
     applyRatingFilter(url, ratingFilter);
     const payload = await fetchJson<{ data?: unknown[] }>(url, 1);
-    const raw = arrayValue(payload.data).map(record).find((item) => stringValue(item.civilization) === civilization);
+    const raw = arrayValue(payload.data)
+      .map(record)
+      .find((item) => stringValue(item.civilization) === civilization);
     const stat = raw
       ? {
           civilization,
@@ -1193,16 +1412,32 @@ function addContextualMatchupReason(candidate: ScoredCandidate, matchupStats: Ma
     return;
   }
 
-  const context = mapStat
-    ? ` and ${mapStat.winRate.toFixed(1)}% win rate on ${candidate.game.map ?? "this map"}`
-    : "";
+  const context = mapStat ? ` and ${mapStat.winRate.toFixed(1)}% win rate on ${candidate.game.map ?? "this map"}` : "";
   const statContext = isEliteGame(candidate.game) ? " at 1700+ Elo" : "";
   if (matchupStat.winRate < 42) {
-    addSummaryReason(candidate, "very_bad_contextual_matchup_win", `${winner.civilization} has ${matchupStat.winRate.toFixed(1)}% win rate vs ${loser.civilization}${context}${statContext}`, 30, "Bad matchup");
+    addSummaryReason(
+      candidate,
+      "very_bad_contextual_matchup_win",
+      `${winner.civilization} has ${matchupStat.winRate.toFixed(1)}% win rate vs ${loser.civilization}${context}${statContext}`,
+      30,
+      "Bad matchup",
+    );
   } else if (matchupStat.winRate < 45) {
-    addSummaryReason(candidate, "bad_contextual_matchup_win", `${winner.civilization} has ${matchupStat.winRate.toFixed(1)}% win rate vs ${loser.civilization}${context}${statContext}`, 22, "Bad matchup");
+    addSummaryReason(
+      candidate,
+      "bad_contextual_matchup_win",
+      `${winner.civilization} has ${matchupStat.winRate.toFixed(1)}% win rate vs ${loser.civilization}${context}${statContext}`,
+      22,
+      "Bad matchup",
+    );
   } else if (matchupStat.winRate < 47) {
-    addSummaryReason(candidate, "contextual_matchup_upset", `${winner.civilization} has ${matchupStat.winRate.toFixed(1)}% win rate vs ${loser.civilization}${context}${statContext}`, 14, "Matchup upset");
+    addSummaryReason(
+      candidate,
+      "contextual_matchup_upset",
+      `${winner.civilization} has ${matchupStat.winRate.toFixed(1)}% win rate vs ${loser.civilization}${context}${statContext}`,
+      14,
+      "Matchup upset",
+    );
   }
   if (isEliteGame(candidate.game) && matchupStat.winRate < 47) {
     addSummaryReason(candidate, "elite_bad_matchup_bonus", "Elite-level win in a difficult matchup", 8, "Elite matchup");
@@ -1232,12 +1467,30 @@ async function enrichFinalistsWithSummaries(
         mapStat = await fetchMapCivStat(mapId, winner.civilization, eliteGame ? ">1700" : undefined);
         if (mapStat) {
           if (mapStat.winRate < 45) {
-            addSummaryReason(candidate, "map_disadvantage_win_strong", `${winner.civilization} has ${mapStat.winRate.toFixed(1)}% win rate on ${candidate.game.map ?? "this map"}${statContext}`, 26, "Map disadvantage");
+            addSummaryReason(
+              candidate,
+              "map_disadvantage_win_strong",
+              `${winner.civilization} has ${mapStat.winRate.toFixed(1)}% win rate on ${candidate.game.map ?? "this map"}${statContext}`,
+              26,
+              "Map disadvantage",
+            );
           } else if (mapStat.winRate < 47) {
-            addSummaryReason(candidate, "map_disadvantage_win", `${winner.civilization} has ${mapStat.winRate.toFixed(1)}% win rate on ${candidate.game.map ?? "this map"}${statContext}`, 18, "Map disadvantage");
+            addSummaryReason(
+              candidate,
+              "map_disadvantage_win",
+              `${winner.civilization} has ${mapStat.winRate.toFixed(1)}% win rate on ${candidate.game.map ?? "this map"}${statContext}`,
+              18,
+              "Map disadvantage",
+            );
           }
           if (isEliteGame(candidate.game) && mapStat.winRate < 47) {
-            addSummaryReason(candidate, "elite_map_disadvantage_bonus", "Elite-level win on a difficult map for the winner's civilization", 8, "Elite map angle");
+            addSummaryReason(
+              candidate,
+              "elite_map_disadvantage_bonus",
+              "Elite-level win on a difficult map for the winner's civilization",
+              8,
+              "Elite map angle",
+            );
           }
         }
       }
@@ -1365,7 +1618,9 @@ function hydrateAgeupStats(value: unknown) {
   for (const raw of arrayValue(value)) {
     const item = record(raw);
     const civilization = normalizeCivilizationKey(stringValue(item.civilization));
-    const path = arrayValue(item.path).map((entry) => intValue(entry)).filter((entry): entry is number => entry != null);
+    const path = arrayValue(item.path)
+      .map((entry) => intValue(entry))
+      .filter((entry): entry is number => entry != null);
     if (!civilization || !path.length) continue;
     const stat: AgeupStat = {
       civilization,
@@ -1405,7 +1660,10 @@ async function fetchCurrentAgeupStats() {
     for (const section of sections) {
       const rows = arrayValue(sectionData[section.key]).map(record);
       const totalsByCivilization = new Map<string, number>();
-      const landmarkGroups = new Map<string, { civilization: string; pbgid: number; label: string; playerGamesCount: number; weightedWins: number }>();
+      const landmarkGroups = new Map<
+        string,
+        { civilization: string; pbgid: number; label: string; playerGamesCount: number; weightedWins: number }
+      >();
       for (const item of rows) {
         const civilization = normalizeCivilizationKey(stringValue(item.civilization)) ?? defaultCivilization;
         const playerGamesCount = intValue(item.player_games_count, item.playerGamesCount) ?? 0;
@@ -1802,7 +2060,12 @@ async function runScan(forcePlayers = false, options: { allowDeepFallback?: bool
     let expanded = false;
 
     if (options.allowDeepFallback !== false && selection.selected.length < GAMES_TO_SAVE_PER_SCAN) {
-      const expandedFetch = await fetchCandidateGames(profileIds, expandedSince, excludedGameIds, primaryFetch.diagnostics.nextPlayerOffset);
+      const expandedFetch = await fetchCandidateGames(
+        profileIds,
+        expandedSince,
+        excludedGameIds,
+        primaryFetch.diagnostics.nextPlayerOffset,
+      );
       const expandedGames = expandedFetch.games;
       games = expandedGames;
       fetchDiagnostics = expandedFetch.diagnostics;
@@ -1835,7 +2098,10 @@ async function runScan(forcePlayers = false, options: { allowDeepFallback?: bool
     const now = FieldValue.serverTimestamp();
     const selectedGameIds = selectedWithCivilizationMains.map((candidate) => candidate.game.aoe4worldGameId);
     const selectedGameUrls = Object.fromEntries(
-      selectedWithCivilizationMains.map((candidate) => [candidate.game.aoe4worldGameId, candidate.summaryUrl ?? candidate.game.aoe4worldUrl]),
+      selectedWithCivilizationMains.map((candidate) => [
+        candidate.game.aoe4worldGameId,
+        candidate.summaryUrl ?? candidate.game.aoe4worldUrl,
+      ]),
     );
     const totalApiRequestsMade = primaryFetch.diagnostics.apiRequestsMade + (expandedFetchDiagnostics?.apiRequestsMade ?? 0);
     const totalRawGamesFetched = primaryFetch.diagnostics.rawGamesFetched + (expandedFetchDiagnostics?.rawGamesFetched ?? 0);
@@ -1849,8 +2115,8 @@ async function runScan(forcePlayers = false, options: { allowDeepFallback?: bool
     const message = selection.selected.length
       ? `Stored ${selectedWithCivilizationMains.length} games: ${selectedGameIds.join(", ")}.`
       : selection.qualified.length
-        ? `Found ${selection.qualified.length} qualified candidates, but none were selected after filtering.`
-        : `No candidate crossed score ${MIN_SCORE}.`;
+      ? `Found ${selection.qualified.length} qualified candidates, but none were selected after filtering.`
+      : `No candidate crossed score ${MIN_SCORE}.`;
     await Promise.all([
       SCAN_STATE_DOC.set(
         {
@@ -2049,7 +2315,9 @@ function storedGameFromData(id: string, data: AnyRecord): AoeGame {
     season: stringValue(data.season),
     averageRating: intValue(data.averageRating, data.average_rating),
     averageMmr: intValue(data.averageMmr, data.average_mmr),
-    civilizations: arrayValue(data.civilizations).map((civ) => stringValue(civ)).filter((civ): civ is string => Boolean(civ)),
+    civilizations: arrayValue(data.civilizations)
+      .map((civ) => stringValue(civ))
+      .filter((civ): civ is string => Boolean(civ)),
     players,
   };
 }
@@ -2064,18 +2332,22 @@ function storedOutlierFromData(id: string, data: AnyRecord): StoredOutlierGame {
     score: numberValue(data.score) ?? 0,
     summaryAvailable: typeof data.summaryAvailable === "boolean" ? data.summaryAvailable : null,
     summaryUrl: stringValue(data.summaryUrl) ?? null,
-    reasons: arrayValue(data.reasons).map(record).map((reason) => ({
-      type: stringValue(reason.type) ?? "unknown",
-      label: stringValue(reason.label) ?? "Unknown reason",
-      weight: numberValue(reason.weight) ?? 0,
-      ...(stringValue(reason.playerProfileId, reason.player_profile_id)
-        ? { playerProfileId: stringValue(reason.playerProfileId, reason.player_profile_id) ?? undefined }
-        : {}),
-      ...(stringValue(reason.playerResult, reason.player_result)
-        ? { playerResult: stringValue(reason.playerResult, reason.player_result) }
-        : {}),
-    })),
-    tags: arrayValue(data.tags).map((tag) => stringValue(tag)).filter((tag): tag is string => Boolean(tag)),
+    reasons: arrayValue(data.reasons)
+      .map(record)
+      .map((reason) => ({
+        type: stringValue(reason.type) ?? "unknown",
+        label: stringValue(reason.label) ?? "Unknown reason",
+        weight: numberValue(reason.weight) ?? 0,
+        ...(stringValue(reason.playerProfileId, reason.player_profile_id)
+          ? { playerProfileId: stringValue(reason.playerProfileId, reason.player_profile_id) ?? undefined }
+          : {}),
+        ...(stringValue(reason.playerResult, reason.player_result)
+          ? { playerResult: stringValue(reason.playerResult, reason.player_result) }
+          : {}),
+      })),
+    tags: arrayValue(data.tags)
+      .map((tag) => stringValue(tag))
+      .filter((tag): tag is string => Boolean(tag)),
     matchupStats: (data.matchupStats as StoredOutlierGame["matchupStats"]) ?? null,
     isFreshPick: Boolean(data.isFreshPick),
   };
@@ -2103,9 +2375,44 @@ async function updateArchiveSnapshot() {
   return games.length;
 }
 
+async function updateCivilizationMainsSnapshot() {
+  const snapshot = await PLAYER_CIVILIZATION_MAIN_COLLECTION.limit(CIVILIZATION_MAINS_SNAPSHOT_LIMIT).get();
+  const players = snapshot.docs
+    .map((document) => {
+      const data = record(document.data());
+      const main = storedCivilizationMain(data.main);
+      if (!main) return null;
+      return {
+        profileId: stringValue(data.profileId) ?? document.id,
+        name: stringValue(data.name) ?? `Player ${document.id}`,
+        civilization: stringValue(data.civilization),
+        rating: intValue(data.rating),
+        mmr: intValue(data.mmr),
+        inputType: stringValue(data.inputType),
+        social: socialLinks(data.social),
+        main,
+        lastSeenAt: data.lastSeenAt ?? data.refreshedAt ?? null,
+      };
+    })
+    .filter((player): player is NonNullable<typeof player> => Boolean(player))
+    .sort((a, b) => b.main.pickRate - a.main.pickRate || b.main.gamesCount - a.main.gamesCount);
+
+  await CIVILIZATION_MAINS_SNAPSHOT_DOC.set({
+    updatedAt: FieldValue.serverTimestamp(),
+    count: players.length,
+    limit: CIVILIZATION_MAINS_SNAPSHOT_LIMIT,
+    players,
+  });
+
+  return players.length;
+}
+
 async function updatePublicMetaSnapshots() {
-  const archiveSnapshotCount = await updateArchiveSnapshot();
-  return { archiveSnapshotCount };
+  const [archiveSnapshotCount, civilizationMainsSnapshotCount] = await Promise.all([
+    updateArchiveSnapshot(),
+    updateCivilizationMainsSnapshot(),
+  ]);
+  return { archiveSnapshotCount, civilizationMainsSnapshotCount };
 }
 
 async function rescoreSavedOutliers(dryRun = true) {
@@ -2130,7 +2437,8 @@ async function rescoreSavedOutliers(dryRun = true) {
       const game = storedGameFromData(doc.id, data);
       const baseScore = scoreGame(game, civStats, eliteCivStats);
       let candidate: ScoredCandidate = { game, ...baseScore };
-      if (candidate.score >= MIN_SCORE) candidate = await enrichCandidateWithSummary(candidate, matchupStats, eliteMatchupStats, ageupStats);
+      if (candidate.score >= MIN_SCORE)
+        candidate = await enrichCandidateWithSummary(candidate, matchupStats, eliteMatchupStats, ageupStats);
 
       const oldScore = Number(data.score ?? 0);
       if (candidate.score < MIN_SCORE) {
@@ -2233,15 +2541,18 @@ export const scanOutliersNow = onRequest({ region: "us-central1", timeoutSeconds
   response.json(result);
 });
 
-export const refreshAgeupStatsNow = onRequest({ region: "us-central1", timeoutSeconds: 180, memory: "256MiB" }, async (request, response) => {
-  const secret = process.env.MANUAL_SCAN_SECRET;
-  if (!secret || request.query.secret !== secret) {
-    response.status(403).json({ ok: false, error: "Forbidden" });
-    return;
-  }
-  const result = await updateAgeupStats();
-  response.json({ ok: true, ...result });
-});
+export const refreshAgeupStatsNow = onRequest(
+  { region: "us-central1", timeoutSeconds: 180, memory: "256MiB" },
+  async (request, response) => {
+    const secret = process.env.MANUAL_SCAN_SECRET;
+    if (!secret || request.query.secret !== secret) {
+      response.status(403).json({ ok: false, error: "Forbidden" });
+      return;
+    }
+    const result = await updateAgeupStats();
+    response.json({ ok: true, ...result });
+  },
+);
 
 export const refreshMapPoolNow = onRequest({ region: "us-central1", timeoutSeconds: 120, memory: "256MiB" }, async (request, response) => {
   const secret = process.env.MANUAL_SCAN_SECRET;
@@ -2253,13 +2564,16 @@ export const refreshMapPoolNow = onRequest({ region: "us-central1", timeoutSecon
   response.json({ ok: true, patch: result.patch, mapsCount: result.maps.length, maps: result.maps });
 });
 
-export const rescoreSavedOutliersNow = onRequest({ region: "us-central1", timeoutSeconds: 540, memory: "512MiB" }, async (request, response) => {
-  const secret = process.env.MANUAL_SCAN_SECRET;
-  if (!secret || request.query.secret !== secret) {
-    response.status(403).json({ ok: false, error: "Forbidden" });
-    return;
-  }
-  const dryRun = request.query.dryRun !== "false";
-  const result = await rescoreSavedOutliers(dryRun);
-  response.json(result);
-});
+export const rescoreSavedOutliersNow = onRequest(
+  { region: "us-central1", timeoutSeconds: 540, memory: "512MiB" },
+  async (request, response) => {
+    const secret = process.env.MANUAL_SCAN_SECRET;
+    if (!secret || request.query.secret !== secret) {
+      response.status(403).json({ ok: false, error: "Forbidden" });
+      return;
+    }
+    const dryRun = request.query.dryRun !== "false";
+    const result = await rescoreSavedOutliers(dryRun);
+    response.json(result);
+  },
+);

@@ -12,13 +12,8 @@ service cloud.firestore {
       allow write: if false;
     }
 
-    match /scanRuns/{runId} {
-      allow read: if true;
-      allow write: if false;
-    }
-
     match /meta/{docId} {
-      allow read: if docId in ["publicStatus", "homepageHighlights", "archiveSnapshot", "mapPool"];
+      allow read: if docId in ["publicStatus", "homepageHighlights", "archiveSnapshot", "civilizationMainsSnapshot", "mapPool"];
       allow write: if false;
     }
 

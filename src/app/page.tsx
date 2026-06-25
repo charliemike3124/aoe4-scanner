@@ -5,8 +5,25 @@ import { OutlierFeed } from "@/components/games/OutlierFeed";
 import { buttonClassName } from "@/components/ui/button";
 
 export default function Home() {
+  const structuredData = {
+    "@context": "https://schema.org",
+    "@type": "WebSite",
+    name: "AOE4Scanner",
+    url: "https://www.aoe4scanner.com/",
+    description: "Discover unusual high-level Age of Empires IV ranked 1v1 games and civilization specialists.",
+    publisher: {
+      "@type": "Person",
+      name: "SwaggyProfessor",
+      url: "https://www.youtube.com/@SwaggyProfessor",
+    },
+  };
+
   return (
-    <main className="min-h-screen bg-[radial-gradient(circle_at_top_left,rgba(14,165,233,0.16),transparent_34%),linear-gradient(180deg,#030712_0%,#07111f_55%,#030712_100%)]">
+    <main
+      id="main-content"
+      className="min-h-screen bg-[radial-gradient(circle_at_top_left,rgba(14,165,233,0.16),transparent_34%),linear-gradient(180deg,#030712_0%,#07111f_55%,#030712_100%)]"
+    >
+      <script type="application/ld+json" dangerouslySetInnerHTML={{ __html: JSON.stringify(structuredData).replace(/</g, "\\u003c") }} />
       <section className="mx-auto flex w-full max-w-[1080px] flex-col gap-8 px-4 py-8 sm:px-6 lg:px-8">
         <AppNav />
 
@@ -16,7 +33,8 @@ export default function Home() {
               Standout ranked AoE4 games worth studying
             </h1>
             <p className="max-w-2xl text-base leading-7 text-slate-300">
-              Outlier games are matches where the result breaks expectation: an underdog beats a much higher-rated opponent, a rarely picked civilization wins, a difficult matchup flips, or a high-level game runs unusually long.
+              Outlier games are matches where the result breaks expectation: an underdog beats a much higher-rated opponent, a rarely picked
+              civilization wins, a difficult matchup flips, or a high-level game runs unusually long.
             </p>
           </div>
         </header>
@@ -29,6 +47,23 @@ export default function Home() {
             <ArrowRight className="h-4 w-4" />
           </Link>
         </div>
+
+        <section className="grid gap-4 border-t border-white/10 pt-8 text-sm leading-6 text-slate-400 md:grid-cols-3">
+          <div>
+            <h2 className="font-bold text-white">What gets scanned?</h2>
+            <p className="mt-1">Recent high-level ranked 1v1 matches from AOE4World, refreshed on a regular schedule.</p>
+          </div>
+          <div>
+            <h2 className="font-bold text-white">Why is a game featured?</h2>
+            <p className="mt-1">
+              The scanner looks for rating upsets, uncommon civilization wins, difficult matchups, and unusual game patterns.
+            </p>
+          </div>
+          <div>
+            <h2 className="font-bold text-white">Who is it for?</h2>
+            <p className="mt-1">Players, coaches, casters, and creators looking for memorable matches worth studying or sharing.</p>
+          </div>
+        </section>
       </section>
     </main>
   );

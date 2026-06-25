@@ -1,4 +1,5 @@
 import { initializeApp, getApps } from "firebase/app";
+import { initializeAppCheck, ReCaptchaEnterpriseProvider } from "firebase/app-check";
 import { getFirestore } from "firebase/firestore";
 
 const firebaseConfig = {
@@ -12,4 +13,17 @@ const firebaseConfig = {
 };
 
 export const firebaseApp = getApps().length ? getApps()[0] : initializeApp(firebaseConfig);
+
+const appCheckSiteKey = process.env.NEXT_PUBLIC_FIREBASE_APP_CHECK_SITE_KEY;
+if (typeof window !== "undefined" && appCheckSiteKey) {
+  try {
+    initializeAppCheck(firebaseApp, {
+      provider: new ReCaptchaEnterpriseProvider(appCheckSiteKey),
+      isTokenAutoRefreshEnabled: true,
+    });
+  } catch {
+    // Development hot reload may attempt to initialize the existing App Check instance again.
+  }
+}
+
 export const db = getFirestore(firebaseApp);

@@ -2,6 +2,7 @@
 
 import { useEffect, useRef, useState } from "react";
 import { ChevronDown } from "lucide-react";
+import Image from "next/image";
 import { CIVILIZATION_FLAGS, CIVILIZATIONS, type Civilization } from "@/lib/aoe4/civilizations";
 import { formatCivilization } from "@/lib/format";
 import { cn } from "@/lib/utils";
@@ -35,7 +36,7 @@ export function CivilizationSelect({ defaultValue }: { defaultValue?: string }) 
       >
         <span className="flex min-w-0 items-center gap-2">
           {selected ? (
-            <img
+            <Image
               src={CIVILIZATION_FLAGS[selected]}
               alt=""
               width={20}
@@ -72,7 +73,7 @@ export function CivilizationSelect({ defaultValue }: { defaultValue?: string }) 
               }}
               className="flex w-full items-center gap-2 rounded px-2 py-2 text-left text-sm text-slate-200 hover:bg-white/10"
             >
-              <img
+              <Image
                 src={CIVILIZATION_FLAGS[civ]}
                 alt=""
                 width={20}

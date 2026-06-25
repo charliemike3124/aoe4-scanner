@@ -34,6 +34,7 @@ The frontend reads public Firestore documents directly from the browser.
 ## Build Checks
 
 ```bash
+npm run lint
 npm run build
 npm run build:functions
 ```
@@ -69,6 +70,34 @@ MANUAL_SCAN_SECRET="replace-with-a-long-random-secret"
 ```
 
 The Firebase web app config in `src/lib/firebase.ts` is client-side Firebase configuration. It is not a server secret, but Firestore rules must remain locked down so public users can only read the intended collections.
+
+The public frontend also supports:
+
+```bash
+NEXT_PUBLIC_GA_MEASUREMENT_ID="G-..."
+NEXT_PUBLIC_FIREBASE_APP_CHECK_SITE_KEY="..."
+```
+
+Google Analytics is consent-gated in the UI. For App Check, register the web app with the reCAPTCHA Enterprise provider, deploy the site key, monitor App Check metrics, and only then enable Cloud Firestore enforcement.
+
+## Public Launch Checklist
+
+- Deploy Hosting, Functions, Firestore rules, and indexes together with `npm run deploy`.
+- Run or wait for a successful scanner cycle so `meta/civilizationMainsSnapshot` is populated. This reduces the civilization directory from hundreds of reads per new visitor to one snapshot read.
+- In Firebase App Check, register every production domain, deploy the site key, monitor valid and invalid requests, then enable Firestore enforcement.
+- In Google Cloud Billing, set a monthly budget and alerts at several thresholds. Budgets notify you; they do not automatically cap spend.
+- Enable Cloud Monitoring alerts for function errors, unusually high invocations, and Firestore read spikes.
+- Add `https://www.aoe4scanner.com/sitemap.xml` to Google Search Console and verify the canonical `www` domain.
+- Confirm the custom domain redirects the non-canonical host and HTTP traffic to `https://www.aoe4scanner.com`.
+- Load-test the public pages against a staging Firebase project before announcing broadly.
+- Rotate `MANUAL_SCAN_SECRET` before launch if it has ever appeared in shell history, screenshots, logs, or a shared URL.
+- Check Firebase and Google Analytics dashboards during the first announcement window.
+
+The `/dev/scans` public route and public access to `scanRuns` are intentionally removed. Operational logs belong in Firebase/Google Cloud consoles, not in a world-readable collection.
+
+## Dependency Notes
+
+Use `npm audit` and `npm --prefix functions audit` as release checks. Avoid `npm audit fix --force` without testing: it can propose framework downgrades or major Firebase Admin upgrades. As of June 22, 2026, the remaining frontend finding is a moderate advisory in Next.js's bundled PostCSS dependency; the automated remediation incorrectly proposes a major downgrade. The remaining Functions findings require a tested major upgrade to Firebase Admin 14.
 
 ## Manual Operations
 
