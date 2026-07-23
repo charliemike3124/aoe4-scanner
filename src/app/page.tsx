@@ -29,6 +29,14 @@ export default function Home() {
 
         <OutlierFeed mode="latest" pageSize={3} showHighlights />
 
+        <p className="rounded-lg border border-sky-400/20 bg-sky-950/25 px-4 py-3 text-sm leading-6 text-slate-300">
+          Data credit: AOE4Scanner organizes match and player data provided by{" "}
+          <a href="https://aoe4world.com/" target="_blank" rel="noreferrer" className="font-bold text-sky-200 transition hover:text-white">
+            AOE4World
+          </a>
+          , the community site that makes this kind of AoE4 research possible.
+        </p>
+
         <div className="flex justify-center">
           <Link href="/games" className={buttonClassName()}>
             Browse archive
