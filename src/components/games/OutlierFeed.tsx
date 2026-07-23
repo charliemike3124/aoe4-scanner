@@ -83,6 +83,10 @@ function readBookmarks() {
   }
 }
 
+function reasonMatchesStrategy(reasonType: string, strategy: string) {
+  return reasonType === strategy || reasonType.startsWith(`${strategy}_`);
+}
+
 function matchesClientFilters(game: OutlierGame, filters: FeedFilters, bookmarks: Set<string>) {
   if (filters.q) {
     const needle = filters.q.toLowerCase();
@@ -102,7 +106,7 @@ function matchesClientFilters(game: OutlierGame, filters: FeedFilters, bookmarks
   if (filters.latest48h && game.startedAt.getTime() < Date.now() - 48 * 60 * 60 * 1000) return false;
   if (filters.minScore != null && game.score < filters.minScore) return false;
   if (filters.maxScore != null && game.score > filters.maxScore) return false;
-  if (filters.strategy && !game.reasons.some((reason) => reason.type === filters.strategy)) return false;
+  if (filters.strategy && !game.reasons.some((reason) => reasonMatchesStrategy(reason.type, filters.strategy!))) return false;
   if (filters.upsetsOnly && !game.reasons.some((reason) => reason.type.toLowerCase().includes('upset') || reason.label.toLowerCase().includes('underdog'))) {
     return false;
   }
