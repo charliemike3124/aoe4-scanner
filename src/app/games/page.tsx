@@ -20,13 +20,6 @@ export default function GamesPage() {
       <section className="mx-auto flex w-full max-w-[1080px] flex-col gap-8 px-4 py-8 sm:px-6 lg:px-8">
         <AppNav />
 
-        <header className="space-y-3">
-          <h1 className="text-4xl font-black text-white">Outlier game archive</h1>
-          <p className="max-w-2xl text-slate-300">
-            Browse recent standout matches the scanner has found, then filter by anything you want.
-          </p>
-        </header>
-
         <Suspense fallback={null}>
           <ArchiveView />
         </Suspense>

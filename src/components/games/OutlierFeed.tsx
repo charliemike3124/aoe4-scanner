@@ -170,9 +170,9 @@ function selectHighlights(games: OutlierGame[]) {
     }
   }
 
-  addMany('Top 3 highest scores', topBy(freshGames.filter((game) => game.score >= 100), (game) => game.score));
-  addMany('Top 3 pro matches', topBy(freshGames.filter((game) => isEliteSavedGame(game)), (game) => game.score));
   addMany('Top 3 biggest upsets', topBy(freshGames.filter((game) => underdogMmrDiff(game) >= 150), underdogMmrDiff));
+  addMany('Top 3 pro matches', topBy(freshGames.filter((game) => isEliteSavedGame(game)), (game) => game.score));
+  addMany('Top 3 highest scores', topBy(freshGames.filter((game) => game.score >= 100), (game) => game.score));
 
   return highlights;
 }

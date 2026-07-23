@@ -6,7 +6,7 @@ import { cn } from "@/lib/utils";
 
 export function AppNav() {
   return (
-    <nav className="flex items-center justify-between gap-4">
+    <nav className="sticky top-0 z-50 -mx-4 flex items-center justify-between gap-4 rounded-b-2xl border-b border-white/10 bg-slate-950/88 px-4 py-3 shadow-[0_16px_40px_rgba(2,6,23,0.34)] backdrop-blur supports-[backdrop-filter]:bg-slate-950/72 sm:-mx-6 sm:px-6 lg:-mx-8 lg:px-8">
       <div className="space-y-1">
         <Link href="/" className="block text-sm font-bold uppercase tracking-[0.28em] text-gold">
           AOE4Scanner
