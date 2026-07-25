@@ -8,6 +8,7 @@ initializeApp();
 
 const db = getFirestore();
 const API_BASE = "https://aoe4world.com/api/v0";
+const REPLAY_API_BASE = "https://aoe4replays.gg/api";
 const USER_AGENT = process.env.AOE4WORLD_USER_AGENT ?? "AOE4Scanner/0.1 contact: configure_AOE4WORLD_USER_AGENT";
 const TRACKED_PLAYERS_DOC = db.collection("meta").doc("trackedPlayers");
 const SCAN_STATE_DOC = db.collection("meta").doc("scanState");
@@ -39,9 +40,13 @@ const ELITE_MMR = 2000;
 const CANDIDATE_LOOKBACK_HOURS = 12;
 const IGNORED_GAME_TTL_HOURS = 24;
 const PRIMARY_LOOKBACK_HOURS = 6;
-const ARCHIVE_SNAPSHOT_LIMIT = 200;
+const OUTLIER_RETENTION_DAYS = 21;
+const ARCHIVE_SNAPSHOT_LIMIT = 500;
+const ARCHIVE_SNAPSHOT_SHARD_SIZE = 100;
+const REPLAY_BACKFILL_PER_SCAN = 5;
+const REPLAY_RETRY_AFTER_HOURS = 24;
 const CIVILIZATION_MAINS_SNAPSHOT_LIMIT = 1000;
-const PUBLIC_META_QUERY_LIMIT = 250;
+const PUBLIC_META_QUERY_LIMIT = 500;
 const AGEUP_STATS_MAX_AGE_DAYS = 10;
 const AGEUP_STATS_SCHEMA_VERSION = 4;
 const AGEUP_ANALYTICS_KIND = "rm_solo";
@@ -156,10 +161,19 @@ type StoredOutlierGame = AoeGame & {
   score: number;
   summaryAvailable: boolean | null;
   summaryUrl: string | null;
+  replayAvailable: boolean | null;
+  replayUrl: string | null;
+  replayCheckedAt: Date | null;
   reasons: Reason[];
   tags: string[];
   matchupStats: ScoredCandidate["matchupStats"] | null;
   isFreshPick?: boolean;
+};
+
+type ReplayAvailability = {
+  available: boolean | null;
+  url: string | null;
+  checkedAt: Date;
 };
 
 type FetchDiagnostics = {
@@ -324,6 +338,39 @@ async function fetchJson<T>(url: URL, retries = 2): Promise<T> {
     break;
   }
   throw lastError ?? new Error("AOE4World request failed");
+}
+
+async function checkReplayAvailability(gameId: string): Promise<ReplayAvailability> {
+  const checkedAt = new Date();
+  const controller = new AbortController();
+  const timeout = setTimeout(() => controller.abort(), 5000);
+  try {
+    const response = await fetch(`${REPLAY_API_BASE}/games/${encodeURIComponent(gameId)}`, {
+      headers: {
+        Accept: "application/json",
+        "User-Agent": USER_AGENT,
+      },
+      signal: controller.signal,
+    });
+    if (response.ok) {
+      return {
+        available: true,
+        url: `https://aoe4replays.gg/games/${encodeURIComponent(gameId)}`,
+        checkedAt,
+      };
+    }
+    if (response.status === 404) return { available: false, url: null, checkedAt };
+    logger.warn("AOE4Replays availability check returned an unexpected response", {
+      gameId,
+      status: response.status,
+    });
+    return { available: null, url: null, checkedAt };
+  } catch (error) {
+    logger.warn("AOE4Replays availability check skipped", { gameId, error });
+    return { available: null, url: null, checkedAt };
+  } finally {
+    clearTimeout(timeout);
+  }
 }
 
 async function loadPlayerCivilizationMain(player: AoePlayer): Promise<CivilizationMain | null> {
@@ -1130,12 +1177,14 @@ function analyzePlayerStrategy(
     );
   }
 
-  const extraTownCenterTimes = constructedBuildingTimes(playerSummary, [
+  const townCenterTimes = constructedBuildingTimes(playerSummary, [
     "town_center",
     "town_centre",
     "town_centre_capitol",
     "town_centre_capital",
   ]);
+  const summaryCivilization = normalizeCivilizationKey(stringValue(playerSummary.civilization)) ?? player.civilization;
+  const extraTownCenterTimes = summaryCivilization === "mongols" ? townCenterTimes.slice(1) : townCenterTimes;
   if (extraTownCenterTimes.length >= 2) {
     addSummaryReason(
       candidate,
@@ -2079,7 +2128,8 @@ async function runScan(forcePlayers = false, options: { allowDeepFallback?: bool
     const selectedWithCivilizationMains = await enrichSelectedCandidatesWithCivilizationMains(selection.selected);
 
     for (const candidate of selectedWithCivilizationMains) {
-      const expiresAt = new Date(candidate.game.startedAt.getTime() + 14 * 24 * 60 * 60 * 1000);
+      const replay = await checkReplayAvailability(candidate.game.aoe4worldGameId);
+      const expiresAt = new Date(candidate.game.startedAt.getTime() + OUTLIER_RETENTION_DAYS * 24 * 60 * 60 * 1000);
       await OUTLIER_COLLECTION.doc(candidate.game.aoe4worldGameId).set({
         ...candidate.game,
         startedAt: Timestamp.fromDate(candidate.game.startedAt),
@@ -2089,6 +2139,9 @@ async function runScan(forcePlayers = false, options: { allowDeepFallback?: bool
         score: candidate.score,
         summaryAvailable: candidate.summaryAvailable ?? null,
         summaryUrl: candidate.summaryUrl ?? null,
+        replayAvailable: replay.available,
+        replayUrl: replay.url,
+        replayCheckedAt: Timestamp.fromDate(replay.checkedAt),
         reasons: candidate.reasons,
         tags: candidate.tags,
         matchupStats: candidate.matchupStats,
@@ -2332,6 +2385,9 @@ function storedOutlierFromData(id: string, data: AnyRecord): StoredOutlierGame {
     score: numberValue(data.score) ?? 0,
     summaryAvailable: typeof data.summaryAvailable === "boolean" ? data.summaryAvailable : null,
     summaryUrl: stringValue(data.summaryUrl) ?? null,
+    replayAvailable: typeof data.replayAvailable === "boolean" ? data.replayAvailable : null,
+    replayUrl: stringValue(data.replayUrl) ?? null,
+    replayCheckedAt: data.replayCheckedAt ? storedDate(data.replayCheckedAt) : null,
     reasons: arrayValue(data.reasons)
       .map(record)
       .map((reason) => ({
@@ -2356,22 +2412,71 @@ function storedOutlierFromData(id: string, data: AnyRecord): StoredOutlierGame {
 async function updateArchiveSnapshot() {
   const now = new Date();
   const snapshot = await OUTLIER_COLLECTION.orderBy("selectedAt", "desc").limit(PUBLIC_META_QUERY_LIMIT).get();
+  const replayBackfills = new Map<string, ReplayAvailability>();
+  const replayBackfillBatch = db.batch();
+  const replayBackfillDocs = snapshot.docs
+    .filter((document) => {
+      const data = document.data();
+      if (typeof data.replayAvailable === "boolean") return false;
+      if (!data.replayCheckedAt) return true;
+      const replayCheckedAt = storedDate(data.replayCheckedAt);
+      return now.getTime() - replayCheckedAt.getTime() >= REPLAY_RETRY_AFTER_HOURS * 60 * 60 * 1000;
+    })
+    .slice(0, REPLAY_BACKFILL_PER_SCAN);
+  for (const document of replayBackfillDocs) {
+    const replay = await checkReplayAvailability(document.id);
+    replayBackfills.set(document.id, replay);
+    replayBackfillBatch.set(
+      document.ref,
+      {
+        replayAvailable: replay.available,
+        replayUrl: replay.url,
+        replayCheckedAt: Timestamp.fromDate(replay.checkedAt),
+      },
+      { merge: true },
+    );
+  }
+  if (replayBackfillDocs.length) await replayBackfillBatch.commit();
+
   const games = snapshot.docs
-    .map((doc) => storedOutlierFromData(doc.id, record(doc.data())))
+    .map((document) => {
+      const replay = replayBackfills.get(document.id);
+      return storedOutlierFromData(document.id, {
+        ...record(document.data()),
+        ...(replay
+          ? {
+              replayAvailable: replay.available,
+              replayUrl: replay.url,
+              replayCheckedAt: replay.checkedAt,
+            }
+          : {}),
+      });
+    })
     .filter((game) => game.expiresAt >= now)
     .sort((a, b) => b.selectedAt.getTime() - a.selectedAt.getTime())
     .slice(0, ARCHIVE_SNAPSHOT_LIMIT)
     .map(serializeStoredOutlierGame);
 
-  await ARCHIVE_SNAPSHOT_DOC.set(
-    {
+  const shardCount = Math.max(1, Math.ceil(games.length / ARCHIVE_SNAPSHOT_SHARD_SIZE));
+  const batch = db.batch();
+  for (let shardIndex = 0; shardIndex < shardCount; shardIndex += 1) {
+    const shardRef =
+      shardIndex === 0 ? ARCHIVE_SNAPSHOT_DOC : db.collection("meta").doc(`archiveSnapshot${shardIndex}`);
+    batch.set(shardRef, {
       updatedAt: FieldValue.serverTimestamp(),
+      schemaVersion: 2,
       limit: ARCHIVE_SNAPSHOT_LIMIT,
       count: games.length,
-      games,
-    },
-    { merge: true },
-  );
+      shardCount,
+      shardIndex,
+      shardSize: ARCHIVE_SNAPSHOT_SHARD_SIZE,
+      games: games.slice(
+        shardIndex * ARCHIVE_SNAPSHOT_SHARD_SIZE,
+        (shardIndex + 1) * ARCHIVE_SNAPSHOT_SHARD_SIZE,
+      ),
+    });
+  }
+  await batch.commit();
   return games.length;
 }
 

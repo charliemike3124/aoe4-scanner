@@ -1,35 +1,43 @@
+"use client";
+
 import Link from "next/link";
-import { Archive, Flag, HeartHandshake } from "lucide-react";
+import { usePathname } from "next/navigation";
+import { ArrowUpRight } from "lucide-react";
 import { Tooltip } from "@/components/ui/tooltip";
 import { buttonClassName } from "@/components/ui/button";
 import { cn } from "@/lib/utils";
 
 export function AppNav() {
+  const pathname = usePathname();
+  const links = [
+    { href: "/", label: "Highlights" },
+    { href: "/mains", label: "Civ mains" },
+    { href: "/games", label: "Archive" },
+  ];
+
   return (
-    <nav className="sticky top-0 z-50 -mx-4 flex items-center justify-between gap-4 rounded-b-2xl border-b border-white/10 bg-slate-950/88 px-4 py-3 shadow-[0_16px_40px_rgba(2,6,23,0.34)] backdrop-blur supports-[backdrop-filter]:bg-slate-950/72 sm:-mx-6 sm:px-6 lg:-mx-8 lg:px-8">
-      <div className="space-y-1">
-        <Link href="/" className="block text-sm font-bold uppercase tracking-[0.28em] text-gold">
+    <nav className="sticky top-0 z-50 border-b border-[#2b332f] bg-[#0b0e0d]/95 backdrop-blur">
+      <div className="app-shell flex flex-col items-start gap-3 py-4 sm:h-[104px] sm:flex-row sm:items-center sm:justify-between sm:gap-5 sm:py-0">
+        <Link href="/" className="block text-base font-extrabold uppercase tracking-[0.22em] text-gold">
           AOE4Scanner
         </Link>
-        <a
-          href="https://www.youtube.com/@SwaggyProfessor"
-          target="_blank"
-          rel="noreferrer"
-          className="block text-xs font-medium text-slate-400 transition hover:text-sky-200"
-        >
-          By SwaggyProfessor
-        </a>
-      </div>
 
-      <div className="flex items-center gap-2">
-        <Link href="/mains" className={cn(buttonClassName("ghost"), "px-3 sm:px-4")}>
-          <Flag className="h-4 w-4" />
-          <span className="hidden sm:inline">Civ Mains</span>
-        </Link>
-        <Link href="/games" className={cn(buttonClassName("ghost"), "px-3 sm:px-4")}>
-          <Archive className="h-4 w-4" />
-          <span className="hidden sm:inline">Browse Games</span>
-        </Link>
+        <div className="flex w-full items-center justify-between gap-1 sm:w-auto sm:justify-start sm:gap-3">
+          {links.map((link) => {
+            const active = link.href === "/" ? pathname === "/" : pathname.startsWith(link.href);
+            return (
+              <Link
+                key={link.href}
+                href={link.href}
+                className={cn(
+                  "relative px-2 py-3 text-[11px] font-bold uppercase tracking-[0.12em] text-[#8f928a] transition hover:text-[#e8e3d4] sm:px-3 sm:text-xs",
+                  active && "text-[#e8e3d4] after:absolute after:inset-x-2 after:bottom-1 after:h-px after:bg-gold",
+                )}
+              >
+                {link.label}
+              </Link>
+            );
+          })}
         <Tooltip
           side="bottom"
           align="end"
@@ -39,12 +47,13 @@ export function AppNav() {
             href="https://www.paypal.com/donate/?hosted_button_id=H3SK4FD7963UE"
             target="_blank"
             rel="noreferrer"
-            className={cn(buttonClassName("secondary"), "px-3 sm:px-4")}
+            className={cn(buttonClassName("secondary"), "ml-1 hidden sm:inline-flex")}
           >
-            <HeartHandshake className="h-4 w-4" />
-            <span className="hidden sm:inline">Donate</span>
+            Support
+            <ArrowUpRight className="h-3.5 w-3.5" />
           </a>
         </Tooltip>
+        </div>
       </div>
     </nav>
   );

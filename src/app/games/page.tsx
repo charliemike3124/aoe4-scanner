@@ -16,10 +16,16 @@ export const metadata: Metadata = {
 
 export default function GamesPage() {
   return (
-    <main id="main-content" className="min-h-screen bg-[linear-gradient(180deg,#030712_0%,#07111f_60%,#030712_100%)]">
-      <section className="mx-auto flex w-full max-w-[1080px] flex-col gap-8 px-4 py-8 sm:px-6 lg:px-8">
-        <AppNav />
-
+    <main id="main-content" className="min-h-screen bg-[#0b0e0d]">
+      <AppNav />
+      <section className="app-shell py-12 sm:py-16">
+        <header className="mb-9">
+          <p className="eyebrow">Saved games</p>
+          <h1 className="mt-3 text-4xl font-semibold tracking-[-0.035em] text-[#e8e3d4] sm:text-5xl">Game archive</h1>
+          <p className="mt-3 max-w-3xl text-sm leading-6 text-[#9ea097] sm:text-base">
+            Search every standout match and open the complete analysis when you need it.
+          </p>
+        </header>
         <Suspense fallback={null}>
           <ArchiveView />
         </Suspense>

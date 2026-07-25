@@ -2,11 +2,11 @@ import Link from "next/link";
 
 export function SiteFooter() {
   return (
-    <footer className="border-t border-white/10 bg-slate-950 px-4 py-6 text-sm text-slate-400">
-      <div className="mx-auto flex w-full max-w-[1080px] flex-col gap-3 sm:flex-row sm:items-center sm:justify-between">
+    <footer className="border-t border-[#2b332f] bg-[#0b0e0d] px-4 py-7 text-xs text-[#8f928a]">
+      <div className="mx-auto flex w-full max-w-[1280px] flex-col gap-3 sm:flex-row sm:items-center sm:justify-between">
         <p>
           AOE4Scanner is an independent community project using data provided by{" "}
-          <a href="https://aoe4world.com/" target="_blank" rel="noreferrer" className="font-medium text-sky-200 transition hover:text-white">
+          <a href="https://aoe4world.com/" target="_blank" rel="noreferrer" className="font-medium text-[#e8e3d4] transition hover:text-gold">
             AOE4World
           </a>
           . Not affiliated with Microsoft.

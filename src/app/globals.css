@@ -3,18 +3,49 @@
 @tailwind utilities;
 
 :root {
-  --background: #030712;
-  --foreground: #f8fafc;
-  --gold: #d6a84f;
+  --background: #0b0e0d;
+  --foreground: #e8e3d4;
+  --gold: #c6a15b;
+  --panel: #121715;
+  --panel-soft: #171c19;
+  --line: #2b332f;
+  --muted: #9ea097;
+  --winner: #76a58a;
+  --loser: #c98576;
+}
+
+html {
+  background: var(--background);
 }
 
 body {
   background: var(--background);
   color: var(--foreground);
+  min-width: 320px;
+  text-rendering: optimizeLegibility;
 }
 
 input,
 select,
 textarea {
   color-scheme: dark;
+}
+
+::selection {
+  background: rgb(198 161 91 / 35%);
+  color: var(--foreground);
+}
+
+@layer utilities {
+  .app-shell {
+    @apply mx-auto w-full max-w-[1280px] px-4 sm:px-6 lg:px-8;
+  }
+
+  .eyebrow {
+    @apply text-[11px] font-bold uppercase tracking-[0.18em] text-gold;
+  }
+
+  .surface {
+    @apply border border-[#2b332f] bg-[#121715];
+  }
 }

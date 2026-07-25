@@ -1,8 +1,5 @@
-import Link from "next/link";
-import { ArrowRight } from "lucide-react";
 import { AppNav } from "@/components/AppNav";
 import { OutlierFeed } from "@/components/games/OutlierFeed";
-import { buttonClassName } from "@/components/ui/button";
 
 export default function Home() {
   const structuredData = {
@@ -19,47 +16,20 @@ export default function Home() {
   };
 
   return (
-    <main
-      id="main-content"
-      className="min-h-screen bg-[radial-gradient(circle_at_top_left,rgba(14,165,233,0.16),transparent_34%),linear-gradient(180deg,#030712_0%,#07111f_55%,#030712_100%)]"
-    >
+    <main id="main-content" className="min-h-screen bg-[#0b0e0d]">
       <script type="application/ld+json" dangerouslySetInnerHTML={{ __html: JSON.stringify(structuredData).replace(/</g, "\\u003c") }} />
-      <section className="mx-auto flex w-full max-w-[1080px] flex-col gap-8 px-4 py-8 sm:px-6 lg:px-8">
-        <AppNav />
-
-        <OutlierFeed mode="latest" pageSize={3} showHighlights />
-
-        <p className="rounded-lg border border-sky-400/20 bg-sky-950/25 px-4 py-3 text-sm leading-6 text-slate-300">
-          Data credit: AOE4Scanner organizes match and player data provided by{" "}
-          <a href="https://aoe4world.com/" target="_blank" rel="noreferrer" className="font-bold text-sky-200 transition hover:text-white">
-            AOE4World
-          </a>
-          , the community site that makes this kind of AoE4 research possible.
-        </p>
-
-        <div className="flex justify-center">
-          <Link href="/games" className={buttonClassName()}>
-            Browse archive
-            <ArrowRight className="h-4 w-4" />
-          </Link>
-        </div>
-
-        <section className="grid gap-4 border-t border-white/10 pt-8 text-sm leading-6 text-slate-400 md:grid-cols-3">
+      <AppNav />
+      <section className="app-shell py-12 sm:py-16">
+        <header className="mb-8 flex flex-wrap items-end justify-between gap-4">
           <div>
-            <h2 className="font-bold text-white">What gets scanned?</h2>
-            <p className="mt-1">Recent high-level ranked 1v1 matches from AOE4World, refreshed on a regular schedule.</p>
-          </div>
-          <div>
-            <h2 className="font-bold text-white">Why is a game featured?</h2>
-            <p className="mt-1">
-              The scanner looks for rating upsets, uncommon civilization wins, difficult matchups, and unusual game patterns.
+            <p className="eyebrow">Top 5 picks</p>
+            <h1 className="mt-3 text-4xl font-semibold tracking-[-0.035em] text-[#e8e3d4] sm:text-5xl">Today&apos;s highlights</h1>
+            <p className="mt-3 max-w-3xl text-sm leading-6 text-[#9ea097] sm:text-base">
+              Five standout games selected for upset value, unusual strategies, and study potential.
             </p>
           </div>
-          <div>
-            <h2 className="font-bold text-white">Who is it for?</h2>
-            <p className="mt-1">Players, coaches, casters, and creators looking for memorable matches worth studying or sharing.</p>
-          </div>
-        </section>
+        </header>
+        <OutlierFeed mode="latest" pageSize={5} showHighlights />
       </section>
     </main>
   );

@@ -1,6 +1,6 @@
 'use client';
 
-import { useEffect, useMemo, useState } from 'react';
+import { useCallback, useEffect, useMemo, useState } from 'react';
 import {
   collection,
   doc,
@@ -23,6 +23,7 @@ type FeedMode = 'latest' | 'archive';
 type FeedFilters = {
   q?: string;
   civilization?: string;
+  opponentCivilization?: string;
   map?: string;
   minElo?: number;
   maxElo?: number;
@@ -37,12 +38,15 @@ type FeedFilters = {
 };
 
 const CACHE_TTL_MS = 15 * 60 * 1000;
-const ARCHIVE_PAGE_SIZE = 20;
-const CACHE_PREFIX = 'aoe4scanner:feed-cache:v3:';
+const ARCHIVE_PAGE_SIZE = 10;
+const ARCHIVE_SNAPSHOT_SHARD_SIZE = 100;
+const CACHE_PREFIX = 'aoe4scanner:feed-cache:v4:';
 const BOOKMARKS_KEY = 'aoe4scanner:bookmarks';
 const LAST_SEEN_KEY = 'aoe4scanner:last-seen-selected-at';
 const SPOILER_KEY = 'aoe4scanner:spoiler-light';
 const HIGHLIGHT_MAX_AGE_MS = 48 * 60 * 60 * 1000;
+const HIGHLIGHT_CANDIDATE_LIMIT = 25;
+const HIGHLIGHT_COUNT = 5;
 
 function serializeGame(game: OutlierGame) {
   return {
@@ -87,20 +91,40 @@ function reasonMatchesStrategy(reasonType: string, strategy: string) {
   return reasonType === strategy || reasonType.startsWith(`${strategy}_`);
 }
 
+function matchesCivilizations(game: OutlierGame, civilization?: string, opponentCivilization?: string) {
+  const selectedCivilizations = [civilization, opponentCivilization].filter(
+    (value): value is string => Boolean(value),
+  );
+  if (!selectedCivilizations.length) return true;
+
+  if (selectedCivilizations.length === 1) {
+    return game.players.some((player) => player.civilization === selectedCivilizations[0]);
+  }
+
+  if (selectedCivilizations[0] === selectedCivilizations[1]) {
+    return game.players.filter((player) => player.civilization === selectedCivilizations[0]).length >= 2;
+  }
+
+  return selectedCivilizations.every((selectedCivilization) =>
+    game.players.some((player) => player.civilization === selectedCivilization),
+  );
+}
+
 function matchesClientFilters(game: OutlierGame, filters: FeedFilters, bookmarks: Set<string>) {
   if (filters.q) {
     const needle = filters.q.toLowerCase();
     if (!game.players.some((player) => player.name.toLowerCase().includes(needle))) return false;
   }
+  if (!matchesCivilizations(game, filters.civilization, filters.opponentCivilization)) return false;
   if (filters.civMainsOnly) {
+    const mainCivilization = filters.civilization ?? filters.opponentCivilization;
     const hasMatchingMain = game.players.some((player) => {
       const mainCiv = player.civilizationMain?.civilization;
       if (!mainCiv) return false;
-      return filters.civilization ? mainCiv === filters.civilization : true;
+      if (player.civilization !== mainCiv) return false;
+      return mainCivilization ? player.civilization === mainCivilization : true;
     });
     if (!hasMatchingMain) return false;
-  } else if (filters.civilization && !game.civilizations.includes(filters.civilization)) {
-    return false;
   }
   if (filters.map && !game.map?.toLowerCase().includes(filters.map.toLowerCase())) return false;
   if (filters.latest48h && game.startedAt.getTime() < Date.now() - 48 * 60 * 60 * 1000) return false;
@@ -165,30 +189,9 @@ function topBy(games: OutlierGame[], score: (game: OutlierGame) => number, count
 }
 
 function selectHighlights(games: OutlierGame[]) {
-  const highlights: Highlight[] = [];
   const freshGames = games.filter((game) => game.selectedAt.getTime() >= Date.now() - HIGHLIGHT_MAX_AGE_MS);
-
-  function addMany(label: string, nextGames: OutlierGame[]) {
-    for (const game of nextGames) {
-      highlights.push({ label, game });
-    }
-  }
-
-  addMany('Top 3 biggest upsets', topBy(freshGames.filter((game) => underdogMmrDiff(game) >= 150), underdogMmrDiff));
-  addMany('Top 3 pro matches', topBy(freshGames.filter((game) => isEliteSavedGame(game)), (game) => game.score));
-  addMany('Top 3 highest scores', topBy(freshGames.filter((game) => game.score >= 100), (game) => game.score));
-
-  return highlights;
-}
-
-function groupedHighlights(highlights: Highlight[]) {
-  const groups: Array<{ label: string; games: OutlierGame[] }> = [];
-  for (const highlight of highlights) {
-    const group = groups.find((entry) => entry.label === highlight.label);
-    if (group) group.games.push(highlight.game);
-    else groups.push({ label: highlight.label, games: [highlight.game] });
-  }
-  return groups;
+  return topBy(freshGames, (game) => underdogMmrDiff(game) * 2 + game.score, HIGHLIGHT_COUNT)
+    .map((game) => ({ label: underdogMmrDiff(game) >= 150 ? 'Major upset' : isEliteSavedGame(game) ? 'Elite match' : 'Standout game', game }));
 }
 
 function HighlightsSection({
@@ -201,27 +204,19 @@ function HighlightsSection({
   lastSeenAt: number;
 }) {
   return (
-    <section className='space-y-3'>
-      <div>
-        <h2 className='text-xl font-black text-white'>Highlights</h2>
-        <p className='text-sm text-slate-400'>Quick picks from the currently saved outlier games.</p>
-      </div>
-      <div className='space-y-4'>
-        {groupedHighlights(highlights).map((group) => (
-          <div key={group.label} className='space-y-3'>
-            <span className='inline-flex rounded-full border border-gold/25 bg-gold/10 px-2.5 py-1 text-xs font-bold uppercase tracking-wide text-gold'>
-              {group.label}
-            </span>
-            <div className='space-y-4'>
-              {group.games.map((game) => (
-                <GameCard
-                  key={game.id}
-                  outlier={game}
-                  spoilerLight={spoilerLight}
-                  isNew={game.selectedAt.getTime() > lastSeenAt}
-                />
-              ))}
+    <section className='space-y-5'>
+      <div className='space-y-5'>
+        {highlights.map((highlight, index) => (
+          <div key={highlight.game.id} className='space-y-2'>
+            <div className='flex items-center justify-between'>
+              <span className='text-[10px] font-bold uppercase tracking-[0.16em] text-gold'>{highlight.label}</span>
+              <span className='text-[10px] font-bold uppercase tracking-[0.16em] text-[#777b74]'>Today&apos;s #{index + 1}</span>
             </div>
+            <GameCard
+              outlier={highlight.game}
+              spoilerLight={spoilerLight}
+              isNew={highlight.game.selectedAt.getTime() > lastSeenAt}
+            />
           </div>
         ))}
       </div>
@@ -238,19 +233,21 @@ function PaginationControls({
   totalPages,
   onPrevious,
   onNext,
+  loadingNext = false,
 }: {
   currentPage: number;
   totalPages: number;
   onPrevious: () => void;
   onNext: () => void;
+  loadingNext?: boolean;
 }) {
   return (
-    <div className='flex flex-wrap items-center justify-center gap-3 text-sm text-slate-300'>
+    <div className='flex flex-wrap items-center justify-center gap-3 text-xs text-[#9ea097]'>
       <button
         type='button'
         onClick={onPrevious}
         disabled={currentPage === 1}
-        className='rounded-md border border-white/10 px-3 py-2 font-bold text-white disabled:cursor-not-allowed disabled:opacity-40'
+        className='rounded-sm border border-[#2b332f] px-3 py-2 font-bold uppercase tracking-wide text-[#e8e3d4] disabled:cursor-not-allowed disabled:opacity-40'
       >
         Previous
       </button>
@@ -260,10 +257,10 @@ function PaginationControls({
       <button
         type='button'
         onClick={onNext}
-        disabled={currentPage === totalPages}
-        className='rounded-md border border-white/10 px-3 py-2 font-bold text-white disabled:cursor-not-allowed disabled:opacity-40'
+        disabled={currentPage === totalPages || loadingNext}
+        className='rounded-sm border border-[#2b332f] px-3 py-2 font-bold uppercase tracking-wide text-[#e8e3d4] disabled:cursor-not-allowed disabled:opacity-40'
       >
-        Next
+        {loadingNext ? 'Loading…' : 'Next'}
       </button>
     </div>
   );
@@ -288,6 +285,11 @@ export function OutlierFeed({
   const [lastSeenAt, setLastSeenAt] = useState(0);
   const [spoilerLight, setSpoilerLight] = useState(false);
   const [currentPage, setCurrentPage] = useState(1);
+  const [archiveCount, setArchiveCount] = useState(0);
+  const [archiveShardCount, setArchiveShardCount] = useState(1);
+  const [loadedArchiveShards, setLoadedArchiveShards] = useState(1);
+  const [loadingOlderGames, setLoadingOlderGames] = useState(false);
+  const [olderGamesError, setOlderGamesError] = useState<string | null>(null);
 
   useEffect(() => {
     setBookmarks(readBookmarks());
@@ -320,6 +322,9 @@ export function OutlierFeed({
               lastScanMessage?: string | null;
               trackedPlayers?: number | null;
             };
+            archiveCount?: number;
+            archiveShardCount?: number;
+            loadedArchiveShards?: number;
           };
           if (Date.now() - parsed.storedAt < CACHE_TTL_MS) {
             setGames(parsed.games.map(hydrateGame));
@@ -329,14 +334,17 @@ export function OutlierFeed({
                 ? new Date(parsed.status.lastSuccessfulScanAt)
                 : null,
             });
+            setArchiveCount(parsed.archiveCount ?? parsed.games.length);
+            setArchiveShardCount(parsed.archiveShardCount ?? 1);
+            setLoadedArchiveShards(parsed.loadedArchiveShards ?? 1);
             setLoading(false);
             return;
           }
         }
 
-        const fetchLimit = mode === 'archive' || showHighlights ? 250 : pageSize ?? 15;
+        const fetchLimit = mode === 'archive' ? 250 : showHighlights ? HIGHLIGHT_CANDIDATE_LIMIT : pageSize ?? 15;
         const gamesQuery = query(collection(db, 'outlierGames'), orderBy('selectedAt', 'desc'), limit(fetchLimit));
-        const archiveSnapshotPromise = mode === 'archive' || showHighlights
+        const archiveSnapshotPromise = mode === 'archive'
           ? getDoc(doc(db, 'meta', 'archiveSnapshot')).catch(() => null)
           : Promise.resolve(null);
         const [archiveSnapshot, statusSnapshot] = await Promise.all([
@@ -354,6 +362,11 @@ export function OutlierFeed({
           nextGames = snapshot.docs.map((gameDoc) => outlierFromSnapshot(gameDoc));
         }
         nextGames = nextGames.sort(newestPickedFirst).slice(0, fetchLimit);
+        const archiveData = archiveSnapshot?.exists() ? archiveSnapshot.data() : undefined;
+        const nextArchiveCount =
+          mode === 'archive' ? Number(archiveData?.count ?? nextGames.length) : nextGames.length;
+        const nextArchiveShardCount =
+          mode === 'archive' ? Math.max(1, Number(archiveData?.shardCount ?? 1)) : 1;
         const nextStatus = statusFromData(statusSnapshot.data());
         localStorage.setItem(
           key,
@@ -364,10 +377,16 @@ export function OutlierFeed({
               ...nextStatus,
               lastSuccessfulScanAt: nextStatus.lastSuccessfulScanAt?.toISOString() ?? null,
             },
+            archiveCount: nextArchiveCount,
+            archiveShardCount: nextArchiveShardCount,
+            loadedArchiveShards: 1,
           }),
         );
         setGames(nextGames);
         setStatus(nextStatus);
+        setArchiveCount(nextArchiveCount);
+        setArchiveShardCount(nextArchiveShardCount);
+        setLoadedArchiveShards(1);
       } catch {
         if (!cancelled)
           setError('The archive could not load right now. Try refreshing the page in a moment.');
@@ -386,12 +405,87 @@ export function OutlierFeed({
     showHighlights,
   ]);
 
+  const filterKey = JSON.stringify(filters);
+  const filtersRequireFullArchive =
+    mode === 'archive' &&
+    (filters.sort === 'score' ||
+      Object.entries(filters).some(([key, value]) => {
+        if (key === 'sort') return false;
+        return value !== undefined && value !== false && value !== '';
+      }));
+
+  const loadArchiveShardsThrough = useCallback(
+    async (targetShardCount: number) => {
+      if (
+        mode !== 'archive' ||
+        loadedArchiveShards >= archiveShardCount
+      ) {
+        return true;
+      }
+      if (loadingOlderGames) return false;
+
+      const end = Math.min(targetShardCount, archiveShardCount);
+      if (end <= loadedArchiveShards) return true;
+
+      setLoadingOlderGames(true);
+      setOlderGamesError(null);
+      try {
+        const shardSnapshots = await Promise.all(
+          Array.from({ length: end - loadedArchiveShards }, (_, offset) =>
+            getDoc(doc(db, 'meta', `archiveSnapshot${loadedArchiveShards + offset}`)),
+          ),
+        );
+        const olderGames = shardSnapshots.flatMap((snapshot) =>
+          snapshot.exists() && Array.isArray(snapshot.data().games)
+            ? (snapshot.data().games as unknown[]).map((game) =>
+                hydrateGame(game as Record<string, unknown>),
+              )
+            : [],
+        );
+        setGames((currentGames) => {
+          const byId = new Map(currentGames.map((game) => [game.id, game]));
+          olderGames.forEach((game) => byId.set(game.id, game));
+          return Array.from(byId.values()).sort(newestPickedFirst);
+        });
+        setLoadedArchiveShards(end);
+        return true;
+      } catch {
+        setOlderGamesError('Older archive games could not be loaded. Please try again.');
+        return false;
+      } finally {
+        setLoadingOlderGames(false);
+      }
+    },
+    [archiveShardCount, loadedArchiveShards, loadingOlderGames, mode],
+  );
+
+  useEffect(() => {
+    if (
+      !filtersRequireFullArchive ||
+      loadedArchiveShards >= archiveShardCount ||
+      loadingOlderGames ||
+      olderGamesError
+    ) {
+      return;
+    }
+    void loadArchiveShardsThrough(archiveShardCount);
+  }, [
+    archiveShardCount,
+    filtersRequireFullArchive,
+    loadArchiveShardsThrough,
+    loadedArchiveShards,
+    loadingOlderGames,
+    olderGamesError,
+  ]);
+
   const visibleGames = useMemo(
     () => games.filter((game) => matchesClientFilters(game, filters, bookmarks)).sort(filters.sort === 'score' ? scoreFirst : newestPickedFirst),
     [bookmarks, filters, games],
   );
-  const filterKey = JSON.stringify(filters);
-  const totalPages = Math.max(1, Math.ceil(visibleGames.length / ARCHIVE_PAGE_SIZE));
+  const archiveFullyLoaded = loadedArchiveShards >= archiveShardCount;
+  const unfilteredNewestArchive = mode === 'archive' && !filtersRequireFullArchive;
+  const resultCount = unfilteredNewestArchive ? archiveCount : visibleGames.length;
+  const totalPages = Math.max(1, Math.ceil(resultCount / ARCHIVE_PAGE_SIZE));
   const feedGames = useMemo(() => {
     if (mode === 'latest') return visibleGames.slice(0, pageSize ?? 15);
     const start = (currentPage - 1) * ARCHIVE_PAGE_SIZE;
@@ -404,6 +498,7 @@ export function OutlierFeed({
 
   useEffect(() => {
     setCurrentPage(1);
+    setOlderGamesError(null);
   }, [bookmarks, filterKey]);
 
   useEffect(() => {
@@ -437,9 +532,15 @@ export function OutlierFeed({
   const countLabel =
     mode === 'latest'
       ? 'Games are updated every hour'
-      : visibleGames.length
-        ? `Showing ${(currentPage - 1) * ARCHIVE_PAGE_SIZE + 1}-${(currentPage - 1) * ARCHIVE_PAGE_SIZE + feedGames.length} of ${visibleGames.length} matching games`
-        : 'No matching games';
+      : loadingOlderGames && filtersRequireFullArchive && !archiveFullyLoaded
+        ? `Loading all ${archiveCount} archived games for these filters…`
+        : resultCount
+          ? `Showing ${(currentPage - 1) * ARCHIVE_PAGE_SIZE + 1}-${(currentPage - 1) * ARCHIVE_PAGE_SIZE + feedGames.length} of ${resultCount} matching games`
+      : 'No matching games';
+  const hasActiveFilters = Object.entries(filters).some(([key, value]) => {
+    if (key === 'sort') return false;
+    return value !== undefined && value !== false && value !== '';
+  });
   const showPagination = mode === 'archive' && totalPages > 1;
   function changePage(nextPageFor: (page: number) => number) {
     setCurrentPage((page) => {
@@ -451,7 +552,25 @@ export function OutlierFeed({
     });
   }
   const goToPreviousPage = () => changePage((page) => Math.max(1, page - 1));
-  const goToNextPage = () => changePage((page) => Math.min(totalPages, page + 1));
+  async function goToNextPage() {
+    const nextPage = Math.min(totalPages, currentPage + 1);
+    if (nextPage === currentPage) return;
+    if (mode === 'archive') {
+      const requiredShardCount = Math.min(
+        archiveShardCount,
+        Math.max(
+          1,
+          Math.ceil((nextPage * ARCHIVE_PAGE_SIZE) / ARCHIVE_SNAPSHOT_SHARD_SIZE),
+        ),
+      );
+      if (requiredShardCount > loadedArchiveShards) {
+        const loaded = await loadArchiveShardsThrough(requiredShardCount);
+        if (!loaded) return;
+      }
+    }
+    setCurrentPage(nextPage);
+    window.requestAnimationFrame(() => window.scrollTo({ top: 0, behavior: 'smooth' }));
+  }
 
   if (loading) {
     return (
@@ -468,16 +587,16 @@ export function OutlierFeed({
 
   return (
     <div className='space-y-4'>
-      <div className='flex flex-wrap items-center justify-between gap-3 rounded-lg border border-white/10 bg-slate-950/70 px-3 py-2 text-sm text-slate-400'>
+      <div className='flex flex-wrap items-center justify-between gap-3 border border-[#2b332f] bg-[#171c19] px-4 py-3 text-xs text-[#9ea097]'>
         <span>{countLabel}</span>
         <div className='flex flex-wrap items-center gap-3'>
-          <span>Last successful scan: {lastScan}</span>
-          <label className='flex items-center gap-2 rounded-md border border-white/10 bg-slate-900/80 px-2.5 py-1.5 text-slate-300'>
+          <span>Last updated {lastScan}</span>
+          <label className='flex items-center gap-2 rounded-sm border border-[#2b332f] bg-[#0b0e0d] px-3 py-2 text-[#e8e3d4]'>
             <input
               type='checkbox'
               checked={spoilerLight}
               onChange={toggleSpoilerLight}
-              className='h-4 w-4 accent-sky-400'
+              className='h-4 w-4 accent-gold'
             />
             Spoiler-light
           </label>
@@ -489,10 +608,16 @@ export function OutlierFeed({
           totalPages={totalPages}
           onPrevious={goToPreviousPage}
           onNext={goToNextPage}
+          loadingNext={loadingOlderGames}
         />
       ) : null}
+      {olderGamesError ? (
+        <div className='border border-[#563039] bg-[#211517] px-4 py-3 text-xs text-[#e6a397]'>
+          {olderGamesError}
+        </div>
+      ) : null}
       {highlights.length ? <HighlightsSection highlights={highlights} spoilerLight={spoilerLight} lastSeenAt={lastSeenAt} /> : null}
-      {feedGames.length ? (
+      {!showHighlights && feedGames.length ? (
         <section className='space-y-3'>
           {mode === 'latest' ? (
             <div>
@@ -505,6 +630,7 @@ export function OutlierFeed({
               <GameCard
                 key={outlier.id}
                 outlier={outlier}
+                compact={mode === 'archive'}
                 spoilerLight={spoilerLight}
                 isNew={outlier.selectedAt.getTime() > lastSeenAt}
               />
@@ -515,21 +641,24 @@ export function OutlierFeed({
                 totalPages={totalPages}
                 onPrevious={goToPreviousPage}
                 onNext={goToNextPage}
+                loadingNext={loadingOlderGames}
               />
             ) : null}
             <ScrollToTopButton />
           </div>
         </section>
-      ) : (
+      ) : !showHighlights ? (
         <EmptyState
-          title='No outlier games saved yet'
+          title={hasActiveFilters ? 'No games found' : 'No games available yet'}
           description={
             filters.bookmarkedOnly
-              ? 'No bookmarked games match these filters yet.'
-              : 'Run the scanner to seed the first card.'
+              ? 'No bookmarked games match the selected filters.'
+              : hasActiveFilters
+                ? 'No saved games match the selected filters. Try adjusting or clearing some filters.'
+                : 'There are no analyzed games to show right now. Please check back later.'
           }
         />
-      )}
+      ) : null}
     </div>
   );
 }

@@ -13,7 +13,17 @@ service cloud.firestore {
     }
 
     match /meta/{docId} {
-      allow read: if docId in ["publicStatus", "homepageHighlights", "archiveSnapshot", "civilizationMainsSnapshot", "mapPool"];
+      allow read: if docId in [
+        "publicStatus",
+        "homepageHighlights",
+        "archiveSnapshot",
+        "archiveSnapshot1",
+        "archiveSnapshot2",
+        "archiveSnapshot3",
+        "archiveSnapshot4",
+        "civilizationMainsSnapshot",
+        "mapPool"
+      ];
       allow write: if false;
     }
 

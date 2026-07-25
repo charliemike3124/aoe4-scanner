@@ -7,7 +7,7 @@ import { ArchiveFilters } from "@/components/games/ArchiveFilters";
 import { OutlierFeed } from "@/components/games/OutlierFeed";
 
 const ARCHIVE_FILTERS_KEY = "aoe4scanner:archive-filters";
-const FILTER_KEYS = ["q", "civilization", "map", "minElo", "maxElo", "minScore", "maxScore", "strategy", "sort", "latest48h", "bookmarkedOnly", "upsetsOnly", "civMainsOnly"];
+const FILTER_KEYS = ["q", "civilization", "opponentCivilization", "map", "minElo", "maxElo", "minScore", "maxScore", "strategy", "sort", "latest48h", "bookmarkedOnly", "upsetsOnly", "civMainsOnly"];
 
 function readSavedFilters() {
   try {
@@ -33,6 +33,7 @@ export function ArchiveView() {
   const filters = useMemo(() => ({
     q: searchParams.get("q") ?? undefined,
     civilization: searchParams.get("civilization") ?? undefined,
+    opponentCivilization: searchParams.get("opponentCivilization") ?? undefined,
     map: searchParams.get("map") ?? undefined,
     minElo: searchParams.get("minElo") ?? undefined,
     maxElo: searchParams.get("maxElo") ?? undefined,
@@ -71,13 +72,16 @@ export function ArchiveView() {
   }
 
   return (
-    <>
-      <ArchiveFilters filters={activeFilters} onApply={applyFilters} onReset={resetFilters} />
+    <div className="grid items-start gap-8 lg:grid-cols-[272px_minmax(0,1fr)]">
+      <div>
+        <ArchiveFilters filters={activeFilters} onApply={applyFilters} onReset={resetFilters} />
+      </div>
       <OutlierFeed
         mode="archive"
         filters={{
           q: activeFilters.q,
           civilization: activeFilters.civilization,
+          opponentCivilization: activeFilters.opponentCivilization,
           map: activeFilters.map,
           minElo,
           maxElo,
@@ -91,6 +95,6 @@ export function ArchiveView() {
           civMainsOnly: activeFilters.civMainsOnly === "true",
         }}
       />
-    </>
+    </div>
   );
 }

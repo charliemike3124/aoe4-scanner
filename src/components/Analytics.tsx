@@ -4,6 +4,7 @@ import Script from "next/script";
 import Link from "next/link";
 import { usePathname } from "next/navigation";
 import { useEffect, useState } from "react";
+import { buttonClassName } from "@/components/ui/button";
 
 const measurementId = process.env.NEXT_PUBLIC_GA_MEASUREMENT_ID ?? "G-8WLV7XMXK1";
 const CONSENT_KEY = "aoe4scanner:analytics-consent";
@@ -76,29 +77,32 @@ function ConsentBanner() {
   return (
     <aside
       aria-label="Analytics preference"
-      className="fixed inset-x-3 bottom-3 z-50 mx-auto max-w-2xl rounded-lg border border-white/15 bg-slate-950/95 p-4 shadow-2xl backdrop-blur"
+      className="fixed inset-x-3 bottom-3 z-50 mx-auto max-w-3xl border border-[#3b443f] border-t-gold bg-[#121715]/95 shadow-[0_20px_60px_rgba(0,0,0,0.45)] backdrop-blur"
     >
-      <div className="flex flex-col gap-3 sm:flex-row sm:items-center sm:justify-between">
-        <p className="text-sm leading-6 text-slate-300">
-          May I use analytics to understand which parts of AOE4Scanner are useful?{" "}
-          <Link href="/privacy" className="text-sky-200 underline underline-offset-2">
-            Privacy details
-          </Link>
-        </p>
-        <div className="flex shrink-0 gap-2">
+      <div className="grid gap-4 p-4 sm:grid-cols-[1fr_auto] sm:items-center sm:p-5">
+        <div>
+          <p className="text-[10px] font-bold uppercase tracking-[0.16em] text-gold">Optional analytics</p>
+          <p className="mt-1.5 max-w-xl text-sm leading-6 text-[#d0cec4]">
+            Help improve AOE4Scanner by sharing anonymous usage data. No advertising or personal profiles.{" "}
+            <Link href="/privacy" className="font-medium text-[#e8e3d4] underline decoration-[#777b74] underline-offset-4 transition hover:text-gold">
+              Read the privacy details
+            </Link>
+          </p>
+        </div>
+        <div className="grid grid-cols-2 gap-2 sm:flex">
           <button
             type="button"
             onClick={() => choose("denied")}
-            className="rounded-md border border-white/15 px-3 py-2 text-sm font-semibold text-slate-200"
+            className={buttonClassName("ghost")}
           >
-            No thanks
+            Not now
           </button>
           <button
             type="button"
             onClick={() => choose("granted")}
-            className="rounded-md bg-sky-400 px-3 py-2 text-sm font-bold text-slate-950"
+            className={buttonClassName()}
           >
-            Allow
+            Share usage
           </button>
         </div>
       </div>

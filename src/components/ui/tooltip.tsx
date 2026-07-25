@@ -11,6 +11,8 @@ export function Tooltip({
 }) {
   const horizontal =
     align === "start" ? "left-0" : align === "end" ? "right-0" : "left-1/2 -translate-x-1/2";
+  const surface =
+    "pointer-events-none absolute z-20 hidden w-max max-w-[min(18rem,calc(100vw-2rem))] border border-[#3b443f] border-l-gold bg-[#171c19] px-3 py-2 text-[11px] font-medium leading-5 tracking-[0.01em] text-[#d0cec4] shadow-[0_12px_32px_rgba(0,0,0,0.4)] group-hover:block group-focus-within:block";
 
   return (
     <span className="group relative inline-flex">
@@ -18,8 +20,8 @@ export function Tooltip({
       <span
         className={
           side === "bottom"
-            ? `pointer-events-none absolute top-full z-20 mt-2 hidden w-max max-w-[min(18rem,calc(100vw-2rem))] rounded-md border border-white/10 bg-slate-950 px-3 py-2 text-xs leading-5 text-slate-200 shadow-2xl group-hover:block ${horizontal}`
-            : `pointer-events-none absolute bottom-full z-20 mb-2 hidden w-max max-w-[min(18rem,calc(100vw-2rem))] rounded-md border border-white/10 bg-slate-950 px-3 py-2 text-xs leading-5 text-slate-200 shadow-2xl group-hover:block ${horizontal}`
+            ? `${surface} top-full mt-2 ${horizontal}`
+            : `${surface} bottom-full mb-2 ${horizontal}`
         }
       >
         {label}

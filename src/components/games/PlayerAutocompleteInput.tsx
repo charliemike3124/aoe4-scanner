@@ -110,19 +110,20 @@ export function PlayerAutocompleteInput({ defaultValue }: { defaultValue?: strin
 
   return (
     <div ref={rootRef} className="relative">
-      <div className="flex rounded-md border border-white/10 bg-slate-900">
-        <Search className="ml-3 mt-2.5 h-4 w-4 text-slate-500" />
+      <div className="flex rounded-sm border border-[#2b332f] bg-[#0b0e0d] transition focus-within:border-gold">
+        <Search className="ml-3 mt-3 h-4 w-4 text-[#686d66]" />
         <input
           name="q"
           value={value}
           onChange={(event) => setValue(event.target.value)}
           onFocus={() => players.length && setOpen(true)}
           autoComplete="off"
-          className="min-w-0 flex-1 bg-transparent px-3 py-2 text-white outline-none"
+          placeholder="Player name…"
+          className="h-10 min-w-0 flex-1 bg-transparent px-3 py-2 text-sm text-[#e8e3d4] outline-none placeholder:text-[#686d66]"
         />
       </div>
       {open && players.length ? (
-        <div className="absolute z-30 mt-2 w-full overflow-hidden rounded-md border border-white/10 bg-slate-950 shadow-2xl">
+        <div className="absolute z-30 mt-2 w-full overflow-hidden rounded-sm border border-[#2b332f] bg-[#121715] shadow-2xl">
           {players.map((player) => (
             <button
               key={player.profile_id}
@@ -133,10 +134,10 @@ export function PlayerAutocompleteInput({ defaultValue }: { defaultValue?: strin
                 setPlayers([]);
                 setOpen(false);
               }}
-              className="flex w-full items-center justify-between gap-3 px-3 py-2 text-left text-sm hover:bg-white/10"
+              className="flex w-full items-center justify-between gap-3 px-3 py-2 text-left text-sm hover:bg-[#1b211e]"
             >
-              <span className="min-w-0 truncate font-medium text-white">{player.name}</span>
-              <span className="shrink-0 text-xs capitalize text-slate-500">
+              <span className="min-w-0 truncate font-medium text-[#e8e3d4]">{player.name}</span>
+              <span className="shrink-0 text-xs capitalize text-[#777b74]">
                 {player.rating ?? "?"} - {rankLabel(player.rank_level)}
               </span>
             </button>

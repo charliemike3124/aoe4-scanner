@@ -1,6 +1,5 @@
 import { Badge } from "@/components/ui/badge";
 
 export function OutlierBadge({ tag }: { tag: string }) {
-  return <Badge className="border-sky-300/20 bg-sky-300/10 text-sky-100">{tag}</Badge>;
+  return <Badge className="border-[#3b443f] bg-[#171c19] text-[#d0cec4]">{tag}</Badge>;
 }
-

@@ -144,13 +144,13 @@ function mergePlayer(current: MainPlayer | undefined, next: MainPlayer): MainPla
 function MainPlayerCard({ player }: { player: MainPlayer }) {
   const profileUrl = playerProfileUrl(player.profileId);
   return (
-    <article className="rounded-lg border border-white/10 bg-slate-950/70 p-4 shadow-lg shadow-black/20">
+    <article className="border border-[#2b332f] bg-[#121715] p-5">
       <div className="flex items-start justify-between gap-3">
         <div className="min-w-0">
-          <Link href={profileUrl} target="_blank" className="block truncate text-lg font-bold text-white transition hover:text-sky-200">
+          <Link href={profileUrl} target="_blank" className="block truncate text-lg font-semibold text-[#e8e3d4] transition hover:text-gold">
             {player.name}
           </Link>
-          <div className="mt-1 flex flex-wrap items-center gap-2 text-xs text-slate-400">
+          <div className="mt-1 flex flex-wrap items-center gap-2 text-xs text-[#8f928a]">
             {player.rating != null ? <span>Elo {player.rating}</span> : null}
             {player.mmr != null ? <span>MMR {player.mmr}</span> : null}
             {player.inputType ? <span>{player.inputType}</span> : null}
@@ -166,15 +166,15 @@ function MainPlayerCard({ player }: { player: MainPlayer }) {
       </div>
 
       <div className="mt-4 grid grid-cols-3 gap-2">
-        <div className="rounded-md border border-gold/20 bg-gold/[0.06] px-3 py-2">
+        <div className="rounded-sm border border-gold/35 bg-gold/[0.06] px-3 py-2">
           <div className="text-[10px] font-bold uppercase tracking-wide text-slate-500">Pick rate</div>
           <div className="mt-0.5 font-bold text-gold">{formatPercent(player.main.pickRate)}</div>
         </div>
-        <div className="rounded-md border border-white/10 bg-white/[0.025] px-3 py-2">
+        <div className="rounded-sm border border-[#2b332f] bg-[#0b0e0d] px-3 py-2">
           <div className="text-[10px] font-bold uppercase tracking-wide text-slate-500">Games</div>
           <div className="mt-0.5 font-bold text-white">{player.main.gamesCount}</div>
         </div>
-        <div className="rounded-md border border-white/10 bg-white/[0.025] px-3 py-2">
+        <div className="rounded-sm border border-[#2b332f] bg-[#0b0e0d] px-3 py-2">
           <div className="text-[10px] font-bold uppercase tracking-wide text-slate-500">Win rate</div>
           <div className="mt-0.5 font-bold text-white">{formatPercent(player.main.winRate)}</div>
         </div>
@@ -193,13 +193,13 @@ function MainPlayerCard({ player }: { player: MainPlayer }) {
         ) : null}
         {player.archivedMatches ? (
           <div className="flex items-center justify-between gap-3">
-            <dt className="text-slate-500">Scanner matches</dt>
+            <dt className="text-slate-500">Saved matches</dt>
             <dd className="font-semibold text-slate-200">{player.archivedMatches}</dd>
           </div>
         ) : null}
         {player.latestMatchAt || player.lastSeenAt ? (
           <div className="flex items-center justify-between gap-3">
-            <dt className="text-slate-500">Last seen</dt>
+            <dt className="text-slate-500">Last active</dt>
             <dd className="font-semibold text-slate-200">
               {new Intl.DateTimeFormat("en", { dateStyle: "medium" }).format(player.latestMatchAt ?? player.lastSeenAt ?? new Date())}
             </dd>
@@ -207,7 +207,7 @@ function MainPlayerCard({ player }: { player: MainPlayer }) {
         ) : null}
       </dl>
 
-      <div className="mt-4 flex flex-wrap items-center gap-2 border-t border-white/10 pt-3">
+      <div className="mt-4 flex flex-wrap items-center gap-2 border-t border-[#2b332f] pt-4">
         <Link
           href={profileUrl}
           target="_blank"
@@ -263,6 +263,8 @@ export function CivilizationMainsDirectory() {
   const [players, setPlayers] = useState<MainPlayer[]>([]);
   const [loading, setLoading] = useState(true);
   const [error, setError] = useState<string | null>(null);
+  const [playerQuery, setPlayerQuery] = useState("");
+  const [sortBy, setSortBy] = useState<"rating" | "pickRate" | "winRate">("rating");
 
   useEffect(() => {
     let active = true;
@@ -366,13 +368,17 @@ export function CivilizationMainsDirectory() {
     }
   }, [requestedCivilization]);
 
-  const filteredPlayers = useMemo(
-    () =>
-      players
-        .filter((player) => player.main.civilization === selectedCivilization)
-        .sort((a, b) => b.main.pickRate - a.main.pickRate || b.main.gamesCount - a.main.gamesCount || (b.rating ?? 0) - (a.rating ?? 0)),
-    [players, selectedCivilization],
-  );
+  const filteredPlayers = useMemo(() => {
+    const queryText = playerQuery.trim().toLowerCase();
+    return players
+      .filter((player) => player.main.civilization === selectedCivilization)
+      .filter((player) => !queryText || player.name.toLowerCase().includes(queryText))
+      .sort((a, b) => {
+        if (sortBy === "pickRate") return b.main.pickRate - a.main.pickRate || b.main.gamesCount - a.main.gamesCount;
+        if (sortBy === "winRate") return (b.main.winRate ?? 0) - (a.main.winRate ?? 0) || b.main.gamesCount - a.main.gamesCount;
+        return (b.rating ?? 0) - (a.rating ?? 0) || b.main.gamesCount - a.main.gamesCount;
+      });
+  }, [playerQuery, players, selectedCivilization, sortBy]);
 
   function selectCivilization(civilization: Civilization) {
     setSelectedCivilization(civilization);
@@ -380,9 +386,10 @@ export function CivilizationMainsDirectory() {
   }
 
   return (
-    <div className="space-y-6">
-      <section className="rounded-lg border border-white/10 bg-slate-950/60 p-4">
-        <div className="flex flex-wrap gap-2">
+    <div className="space-y-8">
+      <section className="border border-[#2b332f] bg-[#121715] p-5">
+        <p className="mb-4 text-[11px] font-bold uppercase tracking-[0.16em] text-gold">Choose a civilization</p>
+        <div className="flex flex-wrap gap-3">
           {CIVILIZATIONS.map((civilization) => {
             const selected = civilization === selectedCivilization;
             return (
@@ -393,8 +400,8 @@ export function CivilizationMainsDirectory() {
                   className={cn(
                     "relative flex h-12 w-12 items-center justify-center rounded-full border transition",
                     selected
-                      ? "z-10 border-amber-100 bg-amber-300/20 shadow-[0_0_10px_3px_rgba(251,191,36,0.7),0_0_26px_9px_rgba(245,158,11,0.3)] before:absolute before:-inset-1 before:animate-pulse before:rounded-full before:border before:border-amber-200/80 before:content-[''] after:absolute after:-inset-2 after:animate-ping after:rounded-full after:border after:border-amber-300/25 after:content-['']"
-                      : "border-white/10 bg-white/[0.03] hover:border-sky-300/40 hover:bg-sky-300/10",
+                      ? "z-10 border-[#e8e3d4] bg-gold/15 shadow-[0_0_0_3px_rgba(198,161,91,0.28)]"
+                      : "border-[#2b332f] bg-[#0b0e0d] hover:border-gold",
                   )}
                   aria-label={`Show ${formatCivilization(civilization)} mains`}
                   aria-pressed={selected}
@@ -404,7 +411,7 @@ export function CivilizationMainsDirectory() {
                     alt=""
                     width={32}
                     height={32}
-                    className={cn("relative z-10 h-8 w-8 rounded-full object-cover", selected && "ring-2 ring-amber-100/90")}
+                    className={cn("relative z-10 h-8 w-8 rounded-full object-cover", selected && "ring-1 ring-[#e8e3d4]")}
                   />
                 </button>
               </Tooltip>
@@ -413,7 +420,7 @@ export function CivilizationMainsDirectory() {
         </div>
       </section>
 
-      <div className="flex flex-wrap items-end justify-between gap-3">
+      <div className="flex flex-wrap items-end justify-between gap-5">
         <div>
           <div className="flex items-center gap-2">
             <Image
@@ -423,11 +430,29 @@ export function CivilizationMainsDirectory() {
               height={28}
               className="h-7 w-7 rounded-full object-cover"
             />
-            <h2 className="text-2xl font-black text-white">{formatCivilization(selectedCivilization)} mains</h2>
+            <h2 className="text-2xl font-semibold text-[#e8e3d4]">{formatCivilization(selectedCivilization)} specialists</h2>
           </div>
-          <p className="mt-1 text-sm text-slate-400">
+          <p className="mt-1 text-sm text-[#8f928a]">
             {loading ? "Finding players…" : `${filteredPlayers.length} ${filteredPlayers.length === 1 ? "player" : "players"} found`}
           </p>
+        </div>
+        <div className="flex flex-1 flex-wrap justify-end gap-2">
+          <input
+            type="search"
+            value={playerQuery}
+            onChange={(event) => setPlayerQuery(event.target.value)}
+            placeholder="Search players"
+            className="h-10 min-w-[210px] rounded-sm border border-[#2b332f] bg-[#121715] px-3 text-sm text-[#e8e3d4] outline-none placeholder:text-[#686d66] focus:border-gold"
+          />
+          <select
+            value={sortBy}
+            onChange={(event) => setSortBy(event.target.value as typeof sortBy)}
+            className="h-10 rounded-sm border border-[#2b332f] bg-[#121715] px-3 text-xs font-bold uppercase tracking-wide text-[#d0cec4] outline-none focus:border-gold"
+          >
+            <option value="rating">Sort: rating</option>
+            <option value="pickRate">Sort: pick rate</option>
+            <option value="winRate">Sort: win rate</option>
+          </select>
         </div>
       </div>
 

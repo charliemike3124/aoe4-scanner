@@ -2,7 +2,7 @@
 
 import { useEffect, useLayoutEffect, useRef, useState } from "react";
 import Link from "next/link";
-import { Bookmark, ChevronDown, ChevronUp, ExternalLink, LinkIcon, Twitch, Youtube } from "lucide-react";
+import { Bookmark, Check, ChevronDown, ChevronUp, Copy, ExternalLink, LinkIcon, Play, Twitch, Youtube } from "lucide-react";
 import { CivilizationPill } from "@/components/games/CivilizationPill";
 import { OutlierBadge } from "@/components/games/OutlierBadge";
 import { ScorePill } from "@/components/games/ScorePill";
@@ -35,10 +35,10 @@ function playerTitle(player: OutlierGame["players"][number]) {
 }
 
 function playerStateClass(result?: string | null, spoilerLight = false) {
-  if (spoilerLight) return "border-white/10 bg-slate-900/60";
-  if (result?.toLowerCase() === "win") return "border-emerald-300/30 bg-emerald-400/10";
-  if (result?.toLowerCase() === "loss") return "border-rose-300/25 bg-rose-400/10";
-  return "border-white/10 bg-slate-900/60";
+  if (spoilerLight) return "border-[#2b332f] bg-[#171c19]";
+  if (result?.toLowerCase() === "win") return "border-[#285644] bg-[#10201a]";
+  if (result?.toLowerCase() === "loss") return "border-[#563039] bg-[#211517]";
+  return "border-[#2b332f] bg-[#171c19]";
 }
 
 function formatRating(value?: number | null) {
@@ -66,6 +66,24 @@ function playerPageUrl(player?: OutlierGame["players"][number]) {
 
 function playerGamesUrl(player?: OutlierGame["players"][number]) {
   return player?.profileId ? `https://aoe4world.com/players/${player.profileId}/games` : "https://aoe4world.com/games";
+}
+
+async function writeToClipboard(value: string) {
+  try {
+    await navigator.clipboard.writeText(value);
+    return true;
+  } catch {
+    const textArea = document.createElement("textarea");
+    textArea.value = value;
+    textArea.setAttribute("readonly", "");
+    textArea.style.position = "fixed";
+    textArea.style.opacity = "0";
+    document.body.appendChild(textArea);
+    textArea.select();
+    const copied = document.execCommand("copy");
+    textArea.remove();
+    return copied;
+  }
 }
 
 function reasonDisplayPriority(reason: OutlierGame["reasons"][number]) {
@@ -206,6 +224,8 @@ export function GameCard({
   const gap = playerGap(players);
   const [bookmarked, setBookmarked] = useState(false);
   const [expanded, setExpanded] = useState(false);
+  const [copiedProfileId, setCopiedProfileId] = useState<string | null>(null);
+  const copiedTimerRef = useRef<ReturnType<typeof setTimeout> | null>(null);
   const summaryUnavailable = outlier.summaryAvailable === false;
   const aoe4worldHref = summaryUnavailable ? playerPageUrl(players[0]) : outlier.summaryUrl ?? outlier.aoe4worldUrl;
   const displayReasons = [...outlier.reasons].sort(
@@ -226,6 +246,12 @@ export function GameCard({
     setBookmarked(readBookmarks().has(outlier.id));
   }, [outlier.id]);
 
+  useEffect(() => {
+    return () => {
+      if (copiedTimerRef.current) clearTimeout(copiedTimerRef.current);
+    };
+  }, []);
+
   function toggleBookmark() {
     const bookmarks = readBookmarks();
     if (bookmarks.has(outlier.id)) bookmarks.delete(outlier.id);
@@ -235,24 +261,32 @@ export function GameCard({
     window.dispatchEvent(new Event("aoe4scanner:bookmarks-changed"));
   }
 
+  async function copyPlayerName(player: OutlierGame["players"][number]) {
+    const copied = await writeToClipboard(player.name);
+    if (!copied) return;
+    setCopiedProfileId(player.profileId);
+    if (copiedTimerRef.current) clearTimeout(copiedTimerRef.current);
+    copiedTimerRef.current = setTimeout(() => setCopiedProfileId(null), 1800);
+  }
+
   return (
-    <article className="rounded-lg border border-white/10 bg-slate-950/70 p-4 shadow-xl shadow-black/20">
-      <div className="flex flex-col gap-4 sm:flex-row">
+    <article className="border border-[#2b332f] bg-[#121715] p-4 sm:p-5">
+      <div className="flex flex-col gap-5 sm:flex-row">
         <ScorePill score={outlier.score} />
         <div className="min-w-0 flex-1 space-y-4">
-          <div className="flex flex-wrap items-start justify-between gap-3">
+          <div className="flex flex-wrap items-start justify-between gap-3 border-b border-[#2b332f] pb-4">
             <div className="space-y-2">
               <div className="flex flex-wrap items-center gap-2">
                 {outlier.isFreshPick || isNew ? (
-                  <span className="rounded-full border border-sky-300/25 bg-sky-300/10 px-2 py-0.5 text-xs font-bold uppercase tracking-wide text-sky-200">
+                  <span className="rounded-full border border-gold/35 bg-gold/10 px-2 py-0.5 text-[10px] font-bold uppercase tracking-[0.12em] text-gold">
                     New
                   </span>
                 ) : null}
-                <h2 className="flex flex-wrap items-center gap-x-1.5 text-lg font-bold text-white">
+                <h2 className="flex flex-wrap items-center gap-x-1.5 text-lg font-semibold text-[#e8e3d4]">
                   {players.map((player, index) => (
                     <span key={`${outlier.id}-title-${player.profileId}`} className="inline-flex items-center gap-x-1.5">
-                      {index > 0 ? <span className="text-slate-500">vs</span> : null}
-                      <Link href={index === 0 ? playerGamesUrl(player) : playerPageUrl(player)} target="_blank" className="hover:text-sky-200">
+                      {index > 0 ? <span className="font-normal text-[#6f746d]">vs</span> : null}
+                      <Link href={index === 0 ? playerGamesUrl(player) : playerPageUrl(player)} target="_blank" className="hover:text-gold">
                         {playerTitle(player)}
                       </Link>
                     </span>
@@ -261,6 +295,18 @@ export function GameCard({
               </div>
             </div>
             <div className="flex items-center gap-2">
+              {outlier.replayAvailable ? (
+                <a
+                  className={cn(buttonClassName("secondary"), "h-8 px-2.5 text-gold")}
+                  href={outlier.replayUrl ?? `https://aoe4replays.gg/games/${outlier.aoe4worldGameId}`}
+                  target="_blank"
+                  rel="noreferrer"
+                  title="Open this game on AOE4Replays"
+                >
+                  <Play className="h-3.5 w-3.5 fill-current" />
+                  Watch Replay
+                </a>
+              ) : null}
               <button
                 type="button"
                 onClick={toggleBookmark}
@@ -290,17 +336,37 @@ export function GameCard({
             {players.map((participant) => (
               <div
                 key={`${outlier.id}-${participant.profileId}`}
-                className={cn("rounded-md border px-3 py-2", playerStateClass(participant.result, spoilerLight))}
+                className={cn("group/player rounded-sm border px-3 py-2", playerStateClass(participant.result, spoilerLight))}
               >
                 <div className="flex items-center justify-between gap-3">
                   <div className="min-w-0">
-                    <Link
-                      href={playerPageUrl(participant)}
-                      target="_blank"
-                      className="block truncate text-sm font-semibold text-white transition hover:text-sky-200"
-                    >
-                      {participant.name}
-                    </Link>
+                    <div className="flex min-w-0 items-center gap-1.5">
+                      <Link
+                        href={playerPageUrl(participant)}
+                        target="_blank"
+                        className="min-w-0 truncate text-sm font-semibold text-[#e8e3d4] transition hover:text-gold"
+                      >
+                        {participant.name}
+                      </Link>
+                      <Tooltip
+                        side="top"
+                        align="start"
+                        label={copiedProfileId === participant.profileId ? "Player name copied" : "Copy player name"}
+                      >
+                        <button
+                          type="button"
+                          onClick={() => copyPlayerName(participant)}
+                          className="inline-flex h-5 w-5 shrink-0 items-center justify-center text-[#777b74] opacity-70 transition hover:text-gold hover:opacity-100 focus-visible:outline focus-visible:outline-1 focus-visible:outline-offset-2 focus-visible:outline-gold"
+                          aria-label={`Copy ${participant.name}`}
+                        >
+                          {copiedProfileId === participant.profileId ? (
+                            <Check className="h-3.5 w-3.5 text-[#9bd4b2]" />
+                          ) : (
+                            <Copy className="h-3.5 w-3.5" />
+                          )}
+                        </button>
+                      </Tooltip>
+                    </div>
                     <div className="mt-1 flex flex-col items-start gap-1.5">
                       <div>
                         <CivilizationPill civilization={participant.civilization} />
@@ -342,8 +408,8 @@ export function GameCard({
                   {!spoilerLight ? (
                     <span
                       className={cn(
-                        "shrink-0 rounded-sm px-1.5 py-0.5 text-[10px] font-bold uppercase tracking-wide",
-                        participant.result?.toLowerCase() === "win" ? "bg-emerald-400/15 text-emerald-200" : "bg-rose-400/15 text-rose-200",
+                        "shrink-0 rounded-sm px-1.5 py-0.5 text-[9px] font-bold uppercase tracking-[0.12em]",
+                        participant.result?.toLowerCase() === "win" ? "bg-[#285644]/50 text-[#9bd4b2]" : "bg-[#563039]/50 text-[#e6a397]",
                       )}
                     >
                       {participant.result?.toLowerCase() === "win" ? "Winner" : "Lost"}
@@ -354,29 +420,37 @@ export function GameCard({
             ))}
           </div>
 
-          <dl className="grid grid-cols-2 gap-3 text-sm text-slate-300 md:grid-cols-4">
+          <dl className="grid grid-cols-2 gap-3 text-sm text-[#d0cec4] md:grid-cols-4">
             <div>
-              <dt className="text-xs uppercase tracking-wide text-slate-500">Map</dt>
+              <dt className="text-[10px] font-bold uppercase tracking-[0.12em] text-[#777b74]">Map</dt>
               <dd className="truncate">{outlier.map ?? "Unknown"}</dd>
             </div>
             <div>
-              <dt className="text-xs uppercase tracking-wide text-slate-500">Duration</dt>
+              <dt className="text-[10px] font-bold uppercase tracking-[0.12em] text-[#777b74]">Duration</dt>
               <dd>{formatDuration(outlier.durationSeconds)}</dd>
             </div>
             <div>
-              <dt className="text-xs uppercase tracking-wide text-slate-500">{gap.label}</dt>
+              <dt className="text-[10px] font-bold uppercase tracking-[0.12em] text-[#777b74]">{gap.label}</dt>
               <dd>{gap.value}</dd>
             </div>
             <div>
-              <dt className="text-xs uppercase tracking-wide text-slate-500">Played</dt>
+              <dt className="text-[10px] font-bold uppercase tracking-[0.12em] text-[#777b74]">Played</dt>
               <dd>{new Intl.DateTimeFormat("en", { dateStyle: "medium", timeStyle: "short" }).format(outlier.startedAt)}</dd>
             </div>
           </dl>
 
-          {!compact ? (
-            <div className="space-y-3">
-              <TagRow tags={outlier.tags} />
-              {!spoilerLight ? (
+          <div className="space-y-3">
+            <TagRow tags={outlier.tags} />
+            {compact && !expanded ? (
+              <button
+                type="button"
+                onClick={() => setExpanded(true)}
+                className={cn(buttonClassName("secondary"), "h-9")}
+              >
+                Show full details
+                <ChevronDown className="h-3.5 w-3.5" />
+              </button>
+            ) : !spoilerLight ? (
                 <div className="space-y-3">
                   <div className="grid gap-3 md:grid-cols-2">
                     {players.map((player) => {
@@ -385,8 +459,8 @@ export function GameCard({
                         title: isWinner ? "Winner" : "Loser",
                         player,
                         reasons: isWinner ? winnerReasons : loserReasons,
-                        tone: isWinner ? "border-emerald-300/20 bg-emerald-400/[0.05]" : "border-rose-300/20 bg-rose-400/[0.05]",
-                        heading: isWinner ? "text-emerald-200" : "text-rose-200",
+                        tone: isWinner ? "border-[#285644] bg-[#10201a]" : "border-[#563039] bg-[#211517]",
+                        heading: isWinner ? "text-[#9bd4b2]" : "text-[#e6a397]",
                       };
                       return (
                         <section key={column.player.profileId} className={cn("rounded-md border p-3", column.tone)}>
@@ -423,15 +497,15 @@ export function GameCard({
                       </ul>
                     </section>
                   ) : null}
-                  {expanded || hiddenReasonCount > 0 ? (
+                    {expanded || hiddenReasonCount > 0 || compact ? (
                     <button
                       type="button"
                       onClick={() => setExpanded((next) => !next)}
-                      className="inline-flex items-center gap-1 rounded-md border border-white/10 bg-white/[0.03] px-2.5 py-1 text-xs font-semibold text-sky-100 transition hover:border-sky-300/40 hover:bg-sky-300/10"
+                      className={cn(buttonClassName("secondary"), "h-9")}
                     >
                       {expanded ? (
                         <>
-                          Show less
+                          {compact ? "Hide full details" : "Show less"}
                           <ChevronUp className="h-3.5 w-3.5" />
                         </>
                       ) : (
@@ -443,11 +517,10 @@ export function GameCard({
                     </button>
                   ) : null}
                 </div>
-              ) : (
-                <p className="text-sm text-slate-400">Spoiler-light mode is hiding winner-specific notes.</p>
-              )}
-            </div>
-          ) : null}
+            ) : (
+              <p className="text-sm text-[#9ea097]">Spoiler-light mode is hiding winner-specific notes.</p>
+            )}
+          </div>
         </div>
       </div>
     </article>

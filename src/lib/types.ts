@@ -48,6 +48,8 @@ export type OutlierGame = {
   isFreshPick?: boolean;
   summaryAvailable?: boolean | null;
   summaryUrl?: string | null;
+  replayAvailable?: boolean | null;
+  replayUrl?: string | null;
   reasons: OutlierReason[];
   tags: string[];
   civilizations: string[];
