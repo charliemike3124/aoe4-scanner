@@ -31,7 +31,8 @@ type MainPlayer = {
   latestMatchAt: Date | null;
 };
 
-const DIRECTORY_CACHE_KEY = "aoe4scanner:civilization-mains:v1";
+const MIN_TRACKED_MMR = 1700;
+const DIRECTORY_CACHE_KEY = "aoe4scanner:civilization-mains:v2";
 const DIRECTORY_CACHE_TTL_MS = 6 * 60 * 60 * 1000;
 
 function dateValue(value: Timestamp | Date | string | null | undefined) {
@@ -47,13 +48,21 @@ function numberValue(value: unknown) {
 
 function mainPlayerFromData(data: Record<string, unknown>, fallbackId: string): MainPlayer | null {
   const main = data.main as Record<string, unknown> | null | undefined;
-  if (!main?.civilization || typeof main.pickRate !== "number" || typeof main.gamesCount !== "number") return null;
+  const mmr = numberValue(data.mmr);
+  if (
+    mmr == null ||
+    mmr < MIN_TRACKED_MMR ||
+    !main?.civilization ||
+    typeof main.pickRate !== "number" ||
+    typeof main.gamesCount !== "number"
+  )
+    return null;
   return {
     profileId: String(data.profileId ?? fallbackId),
     name: String(data.name ?? `Player ${fallbackId}`),
     civilization: typeof data.civilization === "string" ? data.civilization : null,
     rating: numberValue(data.rating),
-    mmr: numberValue(data.mmr),
+    mmr,
     inputType: typeof data.inputType === "string" ? data.inputType : null,
     social: data.social && typeof data.social === "object" ? (data.social as Record<string, string>) : {},
     main: {
@@ -77,11 +86,13 @@ function readCachedDirectory() {
       players: Array<Omit<MainPlayer, "lastSeenAt" | "latestMatchAt"> & { lastSeenAt: string | null }>;
     };
     if (Date.now() - cached.storedAt > DIRECTORY_CACHE_TTL_MS) return null;
-    return cached.players.map((player) => ({
-      ...player,
-      lastSeenAt: player.lastSeenAt ? new Date(player.lastSeenAt) : null,
-      latestMatchAt: null,
-    }));
+    return cached.players
+      .filter((player) => player.mmr != null && player.mmr >= MIN_TRACKED_MMR)
+      .map((player) => ({
+        ...player,
+        lastSeenAt: player.lastSeenAt ? new Date(player.lastSeenAt) : null,
+        latestMatchAt: null,
+      }));
   } catch {
     return null;
   }
@@ -264,7 +275,7 @@ export function CivilizationMainsDirectory() {
   const [loading, setLoading] = useState(true);
   const [error, setError] = useState<string | null>(null);
   const [playerQuery, setPlayerQuery] = useState("");
-  const [sortBy, setSortBy] = useState<"rating" | "pickRate" | "winRate">("rating");
+  const [sortBy, setSortBy] = useState<"mmr" | "pickRate" | "winRate">("mmr");
 
   useEffect(() => {
     let active = true;
@@ -322,13 +333,14 @@ export function CivilizationMainsDirectory() {
             )
               return;
             const profileId = String(rawPlayer.profileId ?? "");
-            if (!profileId) return;
+            const mmr = numberValue(rawPlayer.mmr);
+            if (!profileId || mmr == null || mmr < MIN_TRACKED_MMR) return;
             const player: MainPlayer = {
               profileId,
               name: String(rawPlayer.name ?? "Unknown player"),
               civilization: typeof rawPlayer.civilization === "string" ? rawPlayer.civilization : null,
               rating: numberValue(rawPlayer.rating),
-              mmr: numberValue(rawPlayer.mmr),
+              mmr,
               inputType: typeof rawPlayer.inputType === "string" ? rawPlayer.inputType : null,
               social: rawPlayer.social && typeof rawPlayer.social === "object" ? (rawPlayer.social as Record<string, string>) : {},
               main: {
@@ -376,7 +388,7 @@ export function CivilizationMainsDirectory() {
       .sort((a, b) => {
         if (sortBy === "pickRate") return b.main.pickRate - a.main.pickRate || b.main.gamesCount - a.main.gamesCount;
         if (sortBy === "winRate") return (b.main.winRate ?? 0) - (a.main.winRate ?? 0) || b.main.gamesCount - a.main.gamesCount;
-        return (b.rating ?? 0) - (a.rating ?? 0) || b.main.gamesCount - a.main.gamesCount;
+        return (b.mmr ?? 0) - (a.mmr ?? 0) || b.main.gamesCount - a.main.gamesCount;
       });
   }, [playerQuery, players, selectedCivilization, sortBy]);
 
@@ -449,7 +461,7 @@ export function CivilizationMainsDirectory() {
             onChange={(event) => setSortBy(event.target.value as typeof sortBy)}
             className="h-10 rounded-sm border border-[#2b332f] bg-[#121715] px-3 text-xs font-bold uppercase tracking-wide text-[#d0cec4] outline-none focus:border-gold"
           >
-            <option value="rating">Sort: rating</option>
+            <option value="mmr">Sort: MMR</option>
             <option value="pickRate">Sort: pick rate</option>
             <option value="winRate">Sort: win rate</option>
           </select>

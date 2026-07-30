@@ -22,8 +22,7 @@ export default function Home() {
       <section className="app-shell py-12 sm:py-16">
         <header className="mb-8 flex flex-wrap items-end justify-between gap-4">
           <div>
-            <p className="eyebrow">Top 5 picks</p>
-            <h1 className="mt-3 text-4xl font-semibold tracking-[-0.035em] text-[#e8e3d4] sm:text-5xl">Today&apos;s highlights</h1>
+            <h1 className="text-4xl font-semibold tracking-[-0.035em] text-[#e8e3d4] sm:text-5xl">Today&apos;s highlights</h1>
             <p className="mt-3 max-w-3xl text-sm leading-6 text-[#9ea097] sm:text-base">
               Five standout games selected for upset value, unusual strategies, and study potential.
             </p>

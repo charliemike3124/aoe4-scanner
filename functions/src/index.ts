@@ -15,19 +15,27 @@ const SCAN_STATE_DOC = db.collection("meta").doc("scanState");
 const SCAN_LOCK_DOC = db.collection("meta").doc("scanLock");
 const PUBLIC_STATUS_DOC = db.collection("meta").doc("publicStatus");
 const ARCHIVE_SNAPSHOT_DOC = db.collection("meta").doc("archiveSnapshot");
+const HOMEPAGE_HIGHLIGHTS_DOC = db.collection("meta").doc("homepageHighlights");
 const CIVILIZATION_MAINS_SNAPSHOT_DOC = db.collection("meta").doc("civilizationMainsSnapshot");
 const MAP_POOL_DOC = db.collection("meta").doc("mapPool");
 const AGEUP_STATS_DOC = db.collection("meta").doc("ageupStats");
 const PLAYER_CIVILIZATION_MAIN_COLLECTION = db.collection("playerCivilizationMains");
 const OUTLIER_COLLECTION = db.collection("outlierGames");
 const IGNORED_COLLECTION = db.collection("ignoredGames");
-const MIN_RATING = 1700;
-const MAX_LEADERBOARD_PAGES = 12;
+// AOE4World has no public MMR leaderboard. Rating only bounds the candidate
+// index; observed player and game eligibility is always decided by MMR.
+const MIN_MMR = 1700;
+const DISCOVERY_RATING_FLOOR = 1400;
+const MAX_DISCOVERY_LEADERBOARD_PAGES = 50;
+const DISCOVERY_CACHE_HOURS = 20;
 const BATCH_SIZE = 50;
 const REQUEST_DELAY_MS = 4000;
 const MAX_GAME_PAGES_PER_BATCH = 1;
 const MAX_GAME_REQUESTS_PER_SCAN = 4;
 const ADAPTIVE_MAX_GAME_REQUESTS_PER_SCAN = 8;
+const MAX_TRACKED_MMR_PLAYERS = 5000;
+const MAIN_DISCOVERY_PLAYERS_PER_SCAN = 20;
+const MAIN_MMR_PROBES_PER_SCAN = 25;
 const MIN_FRESH_GAMES_BEFORE_STOPPING = 40;
 const MAX_GAMES_PER_SCAN = 100;
 const GAMES_TO_SAVE_PER_SCAN = 5;
@@ -43,6 +51,7 @@ const PRIMARY_LOOKBACK_HOURS = 6;
 const OUTLIER_RETENTION_DAYS = 21;
 const ARCHIVE_SNAPSHOT_LIMIT = 500;
 const ARCHIVE_SNAPSHOT_SHARD_SIZE = 100;
+const HOMEPAGE_HIGHLIGHT_CANDIDATE_LIMIT = 25;
 const REPLAY_BACKFILL_PER_SCAN = 5;
 const REPLAY_RETRY_AFTER_HOURS = 24;
 const CIVILIZATION_MAINS_SNAPSHOT_LIMIT = 1000;
@@ -56,6 +65,11 @@ const CIVILIZATION_MAIN_MIN_GAMES = 20;
 const CIVILIZATION_MAIN_HIGH_PICK_RATE = 75;
 const CIVILIZATION_MAIN_CACHE_HOURS = 24;
 const CIVILIZATION_MAIN_RULE_VERSION = 2;
+const AOE4WORLD_REQUEST_TIMEOUT_MS = 15 * 1000;
+const AOE4WORLD_MAX_RETRY_DELAY_MS = 15 * 1000;
+const MAP_CIV_STAT_CACHE_MS = 6 * 60 * 60 * 1000;
+const MAP_CIV_STAT_FAILURE_CACHE_MS = 5 * 60 * 1000;
+const GLOBAL_STATS_CACHE_MS = 6 * 60 * 60 * 1000;
 const AGEUP_ANALYTICS_CIVILIZATIONS = [
   "abbasid_dynasty",
   "ayyubids",
@@ -180,7 +194,7 @@ type FetchDiagnostics = {
   apiRequestsMade: number;
   rawGamesFetched: number;
   skippedAlreadyExcluded: number;
-  skippedLowRating: number;
+  skippedLowMmr: number;
   skippedInvalid: number;
   eligibleGamesCollected: number;
   freshGamesCollected: number;
@@ -197,7 +211,13 @@ type MapPoolMap = {
 
 const SCALING_CIVS = new Set(["abbasid_dynasty", "chinese", "byzantines", "zhu_xis_legacy", "jin_dynasty"]);
 const TEMPO_CIVS = new Set(["french", "mongols", "english", "jeanne_darc", "ottomans"]);
-const mapCivStatCache = new Map<string, CivStat | null>();
+const mapCivStatCache = new Map<
+  string,
+  {
+    expiresAt: number;
+    stats: Map<string, CivStat>;
+  }
+>();
 
 function normalizeCivilizationKey(value: string | null) {
   return (
@@ -316,26 +336,56 @@ function civilizationMainFromPlayerProfile(payload: unknown): CivilizationMain |
   return parseCivilizationMain(rmSolo.civilizations);
 }
 
+function retryDelayMs(response: Response | null, attempt: number) {
+  const retryAfter = response?.headers.get("retry-after");
+  if (retryAfter) {
+    const retryAfterSeconds = Number(retryAfter);
+    if (Number.isFinite(retryAfterSeconds) && retryAfterSeconds >= 0) {
+      return Math.min(AOE4WORLD_MAX_RETRY_DELAY_MS, retryAfterSeconds * 1000);
+    }
+    const retryAt = Date.parse(retryAfter);
+    if (Number.isFinite(retryAt)) {
+      return Math.min(AOE4WORLD_MAX_RETRY_DELAY_MS, Math.max(0, retryAt - Date.now()));
+    }
+  }
+
+  const exponentialDelay = 1000 * 2 ** attempt;
+  const jitter = Math.floor(Math.random() * 500);
+  return Math.min(AOE4WORLD_MAX_RETRY_DELAY_MS, exponentialDelay + jitter);
+}
+
 async function fetchJson<T>(url: URL, retries = 2): Promise<T> {
   let lastError: Error | null = null;
   for (let attempt = 0; attempt <= retries; attempt += 1) {
-    const response = await fetch(url, {
-      headers: {
-        Accept: "application/json",
-        "User-Agent": USER_AGENT,
-      },
-    });
-    if (response.ok) return (await response.json()) as T;
+    const controller = new AbortController();
+    const timeout = setTimeout(() => controller.abort(), AOE4WORLD_REQUEST_TIMEOUT_MS);
+    let response: Response | null = null;
+    try {
+      response = await fetch(url, {
+        headers: {
+          Accept: "application/json",
+          "User-Agent": USER_AGENT,
+        },
+        signal: controller.signal,
+      });
+      if (response.ok) return (await response.json()) as T;
 
-    const body = await response.text().catch(() => "");
-    lastError = new Error(`AOE4World ${response.status}: ${body.slice(0, 160)}`);
-    if (response.status === 429) break;
-    if ((response.status === 429 || response.status >= 500) && attempt < retries) {
-      const retryAfter = Number(response.headers.get("retry-after"));
-      await sleep(Number.isFinite(retryAfter) ? retryAfter * 1000 : 2500 * 2 ** attempt);
-      continue;
+      const body = await response.text().catch(() => "");
+      lastError = new Error(`AOE4World ${response.status}: ${body.slice(0, 160)}`);
+      const retryable = response.status === 408 || response.status === 429 || response.status >= 500;
+      if (!retryable || attempt >= retries) break;
+    } catch (error) {
+      const message =
+        error instanceof Error && error.name === "AbortError"
+          ? `AOE4World request timed out after ${AOE4WORLD_REQUEST_TIMEOUT_MS}ms`
+          : `AOE4World request failed: ${error instanceof Error ? error.message : "Unknown network error"}`;
+      lastError = new Error(message);
+      if (attempt >= retries) break;
+    } finally {
+      clearTimeout(timeout);
     }
-    break;
+
+    await sleep(retryDelayMs(response, attempt));
   }
   throw lastError ?? new Error("AOE4World request failed");
 }
@@ -1422,28 +1472,36 @@ function applyRatingFilter(url: URL, ratingFilter?: string) {
 }
 
 async function fetchMapCivStat(mapId: number, civilization: string, ratingFilter?: string) {
-  const cacheKey = `${mapId}|${civilization}|${ratingFilter ?? "all"}`;
-  if (mapCivStatCache.has(cacheKey)) return mapCivStatCache.get(cacheKey) ?? null;
+  const cacheKey = `${mapId}|${ratingFilter ?? "all"}`;
+  const cached = mapCivStatCache.get(cacheKey);
+  if (cached && cached.expiresAt > Date.now()) return cached.stats.get(civilization) ?? null;
+  if (cached) mapCivStatCache.delete(cacheKey);
 
   try {
     const url = new URL(`${API_BASE}/stats/rm_solo/maps/${mapId}`);
     applyRatingFilter(url, ratingFilter);
     const payload = await fetchJson<{ data?: unknown[] }>(url, 1);
-    const raw = arrayValue(payload.data)
-      .map(record)
-      .find((item) => stringValue(item.civilization) === civilization);
-    const stat = raw
-      ? {
-          civilization,
-          winRate: numberValue(raw.win_rate, raw.winRate) ?? 50,
-          pickRate: numberValue(raw.pick_rate, raw.pickRate) ?? 0,
-        }
-      : null;
-    mapCivStatCache.set(cacheKey, stat);
-    return stat;
+    const stats = new Map<string, CivStat>();
+    for (const raw of arrayValue(payload.data).map(record)) {
+      const rawCivilization = stringValue(raw.civilization);
+      if (!rawCivilization) continue;
+      stats.set(rawCivilization, {
+        civilization: rawCivilization,
+        winRate: numberValue(raw.win_rate, raw.winRate) ?? 50,
+        pickRate: numberValue(raw.pick_rate, raw.pickRate) ?? 0,
+      });
+    }
+    mapCivStatCache.set(cacheKey, {
+      expiresAt: Date.now() + MAP_CIV_STAT_CACHE_MS,
+      stats,
+    });
+    return stats.get(civilization) ?? null;
   } catch (error) {
     logger.debug("Map civ stat fetch skipped", { mapId, civilization, error });
-    mapCivStatCache.set(cacheKey, null);
+    mapCivStatCache.set(cacheKey, {
+      expiresAt: Date.now() + MAP_CIV_STAT_FAILURE_CACHE_MS,
+      stats: new Map<string, CivStat>(),
+    });
     return null;
   }
 }
@@ -1590,72 +1648,366 @@ async function selectOutlierCandidates(
   };
 }
 
-async function refreshTrackedPlayersIfNeeded(force = false) {
+async function loadMmrDiscoveryPool(force = false) {
   const snapshot = await TRACKED_PLAYERS_DOC.get();
   const data = snapshot.data();
-  const refreshedAt = data?.refreshedAt instanceof Timestamp ? data.refreshedAt.toDate() : null;
-  const ids = Array.isArray(data?.profileIds) ? (data.profileIds as string[]) : [];
-  if (!force && ids.length && refreshedAt && Date.now() - refreshedAt.getTime() < 20 * 60 * 60 * 1000) return ids;
+  const isMmrDiscoveryCache = data?.discoverySource === "rm_1v1_games" && data?.minMmr === MIN_MMR;
+  const trackedProfileIds = isMmrDiscoveryCache && Array.isArray(data?.profileIds)
+    ? Array.from(new Set(data.profileIds.map((value: unknown) => stringValue(value)).filter((value): value is string => Boolean(value))))
+    : [];
+  const candidateRefreshedAt =
+    data?.candidateRefreshedAt instanceof Timestamp ? data.candidateRefreshedAt.toDate() : null;
+  let candidateProfileIds = Array.isArray(data?.candidateProfileIds)
+    ? Array.from(
+        new Set(
+          data.candidateProfileIds
+            .map((value: unknown) => stringValue(value))
+            .filter((value): value is string => Boolean(value)),
+        ),
+      )
+    : [];
 
-  const profileIds: string[] = [];
-  for (let page = 1; page <= MAX_LEADERBOARD_PAGES; page += 1) {
-    const url = new URL(`${API_BASE}/leaderboards/rm_solo`);
-    url.searchParams.set("page", String(page));
-    const payload = await fetchJson<{ players?: unknown[] }>(url);
-    const players = arrayValue(payload.players);
-    for (const raw of players) {
-      const player = record(raw);
-      const rating = intValue(player.rating);
-      const profileId = stringValue(player.profile_id, player.profileId);
-      if (profileId && rating != null && rating >= MIN_RATING) profileIds.push(profileId);
+  const candidateCacheIsFresh =
+    candidateProfileIds.length > 0 &&
+    candidateRefreshedAt &&
+    data?.candidateRatingFloor === DISCOVERY_RATING_FLOOR &&
+    Date.now() - candidateRefreshedAt.getTime() < DISCOVERY_CACHE_HOURS * 60 * 60 * 1000;
+  if (force || !candidateCacheIsFresh) {
+    candidateProfileIds = [];
+    for (let page = 1; page <= MAX_DISCOVERY_LEADERBOARD_PAGES; page += 1) {
+      const url = new URL(`${API_BASE}/leaderboards/rm_solo`);
+      url.searchParams.set("page", String(page));
+      const payload = await fetchJson<{ players?: unknown[] }>(url);
+      const players = arrayValue(payload.players);
+      for (const raw of players) {
+        const player = record(raw);
+        const rating = intValue(player.rating);
+        const profileId = stringValue(player.profile_id, player.profileId);
+        if (profileId && rating != null && rating >= DISCOVERY_RATING_FLOOR) candidateProfileIds.push(profileId);
+      }
+      const minimumPageRating = Math.min(...players.map((raw) => intValue(record(raw).rating) ?? 0));
+      if (!players.length || minimumPageRating < DISCOVERY_RATING_FLOOR) break;
+      await sleep(REQUEST_DELAY_MS);
     }
-    const minRating = Math.min(...players.map((raw) => intValue(record(raw).rating) ?? 0));
-    if (!players.length || minRating < MIN_RATING) break;
-    await sleep(REQUEST_DELAY_MS);
+    candidateProfileIds = Array.from(new Set(candidateProfileIds));
+    await TRACKED_PLAYERS_DOC.set(
+      {
+        candidateProfileIds,
+        candidateRefreshedAt: FieldValue.serverTimestamp(),
+        candidateRatingFloor: DISCOVERY_RATING_FLOOR,
+      },
+      { merge: true },
+    );
   }
 
-  await TRACKED_PLAYERS_DOC.set({ profileIds, refreshedAt: FieldValue.serverTimestamp(), minRating: MIN_RATING }, { merge: true });
-  await PUBLIC_STATUS_DOC.set({ trackedPlayers: profileIds.length }, { merge: true });
-  return profileIds;
+  return {
+    trackedProfileIds,
+    candidateProfileIds,
+    scanProfileIds: Array.from(new Set([...trackedProfileIds, ...candidateProfileIds])),
+  };
+}
+
+function highMmrPlayersFromGames(games: AoeGame[]) {
+  const players = new Map<string, AoePlayer>();
+  for (const game of games) {
+    for (const player of game.players) {
+      if (player.mmr != null && player.mmr >= MIN_MMR) players.set(player.profileId, player);
+    }
+  }
+  return Array.from(players.values());
+}
+
+async function rememberTrackedMmrPlayers(
+  existingProfileIds: string[],
+  games: AoeGame[],
+  additionalPlayers: AoePlayer[] = [],
+) {
+  const discoveredPlayers = Array.from(
+    new Map(
+      [...highMmrPlayersFromGames(games), ...additionalPlayers]
+        .filter((player) => player.mmr != null && player.mmr >= MIN_MMR)
+        .map((player) => [player.profileId, player]),
+    ).values(),
+  );
+  const merged = Array.from(new Set([...discoveredPlayers.map((player) => player.profileId), ...existingProfileIds])).slice(
+    0,
+    MAX_TRACKED_MMR_PLAYERS,
+  );
+  await TRACKED_PLAYERS_DOC.set(
+    {
+      profileIds: merged,
+      refreshedAt: FieldValue.serverTimestamp(),
+      minMmr: MIN_MMR,
+      discoverySource: "rm_1v1_games",
+    },
+    { merge: true },
+  );
+  return { profileIds: merged, discoveredPlayers: discoveredPlayers.length };
+}
+
+function playerFromRawGame(rawGame: unknown, profileId: string) {
+  const game = record(rawGame);
+  for (const [teamIndex, rawTeam] of arrayValue(game.teams).entries()) {
+    for (const entry of arrayValue(rawTeam)) {
+      const player = record(record(entry).player ?? entry);
+      const entryProfileId = stringValue(player.profile_id, player.profileId, player.id);
+      if (entryProfileId !== profileId) continue;
+      return {
+        profileId: entryProfileId,
+        name: stringValue(player.name, player.username) ?? "Unknown player",
+        civilization: stringValue(player.civilization, player.civ),
+        rating: intValue(player.rating, player.elo),
+        mmr: intValue(player.mmr),
+        ratingDiff: intValue(player.rating_diff, player.ratingDiff),
+        mmrDiff: intValue(player.mmr_diff, player.mmrDiff),
+        result: stringValue(player.result),
+        team: teamIndex + 1,
+        inputType: stringValue(player.input_type, player.inputType),
+        social: socialLinks(player.social),
+      } satisfies AoePlayer;
+    }
+  }
+  return null;
+}
+
+async function probeCivilizationMainsByLatestMmr(candidateProfileIds: string[], startOffset = 0) {
+  if (!candidateProfileIds.length) {
+    return { checked: 0, qualifyingMmr: 0, qualifiedMains: 0, profileLookups: 0, nextOffset: 0, players: [] as AoePlayer[] };
+  }
+
+  const normalizedOffset = Math.max(0, startOffset) % candidateProfileIds.length;
+  const rotatedProfileIds = rotateProfileIds(candidateProfileIds, normalizedOffset);
+  const selectedProfileIds = rotatedProfileIds.slice(0, MAIN_MMR_PROBES_PER_SCAN);
+  const qualifyingPlayers: AoePlayer[] = [];
+  let qualifiedMains = 0;
+  let profileLookups = 0;
+
+  for (const profileId of selectedProfileIds) {
+    try {
+      const url = new URL(`${API_BASE}/players/${profileId}/games`);
+      url.searchParams.set("leaderboard", "rm_solo");
+      url.searchParams.set("limit", "1");
+      const payload = await fetchJson<{ games?: unknown[] }>(url, 1);
+      const player = playerFromRawGame(arrayValue(payload.games)[0], profileId);
+      if (!player || player.mmr == null || player.mmr < MIN_MMR) {
+        await sleep(250);
+        continue;
+      }
+      qualifyingPlayers.push(player);
+      profileLookups += 1;
+      if (await loadPlayerCivilizationMain(player)) qualifiedMains += 1;
+    } catch (error) {
+      logger.debug("Latest-MMR civilization main probe skipped", { profileId, error });
+    }
+    await sleep(250);
+  }
+
+  return {
+    checked: selectedProfileIds.length,
+    qualifyingMmr: qualifyingPlayers.length,
+    qualifiedMains,
+    profileLookups,
+    nextOffset: (normalizedOffset + selectedProfileIds.length) % candidateProfileIds.length,
+    players: qualifyingPlayers,
+  };
+}
+
+async function refreshDiscoveredCivilizationMains(games: AoeGame[], startOffset = 0) {
+  const players = highMmrPlayersFromGames(games);
+  if (!players.length) return { checked: 0, qualified: 0, nextOffset: 0 };
+
+  const normalizedOffset = Math.max(0, startOffset) % players.length;
+  const rotatedPlayers = [...players.slice(normalizedOffset), ...players.slice(0, normalizedOffset)];
+  const snapshots = await db.getAll(
+    ...rotatedPlayers.map((player) => PLAYER_CIVILIZATION_MAIN_COLLECTION.doc(player.profileId)),
+  );
+  const now = Date.now();
+  const playersNeedingRefresh = rotatedPlayers.filter((_, index) => {
+    const data = snapshots[index].data();
+    const refreshedAt = data?.refreshedAt instanceof Timestamp ? data.refreshedAt.toDate() : null;
+    return (
+      data?.ruleVersion !== CIVILIZATION_MAIN_RULE_VERSION ||
+      !refreshedAt ||
+      now - refreshedAt.getTime() >= CIVILIZATION_MAIN_CACHE_HOURS * 60 * 60 * 1000
+    );
+  });
+  const selectedPlayers = playersNeedingRefresh.slice(0, MAIN_DISCOVERY_PLAYERS_PER_SCAN);
+  let qualified = 0;
+  for (const player of selectedPlayers) {
+    const main = await loadPlayerCivilizationMain(player).catch((error) => {
+      logger.debug("Discovered player civilization main lookup skipped", { profileId: player.profileId, error });
+      return null;
+    });
+    if (main) qualified += 1;
+    await sleep(250);
+  }
+
+  return {
+    checked: selectedPlayers.length,
+    qualified,
+    nextOffset: (normalizedOffset + Math.max(selectedPlayers.length, 1)) % players.length,
+  };
 }
 
 async function loadCivStats(ratingFilter?: string) {
+  const cacheRef = db
+    .collection("meta")
+    .doc(ratingFilter ? "civilizationStats1700Cache" : "civilizationStatsAllCache");
+  const staleStats = new Map<string, CivStat>();
+  try {
+    const snapshot = await cacheRef.get();
+    const data = snapshot.data();
+    const updatedAt = data?.updatedAt instanceof Timestamp ? data.updatedAt.toDate() : null;
+    for (const raw of arrayValue(data?.stats)) {
+      const item = record(raw);
+      const civilization = stringValue(item.civilization);
+      if (!civilization) continue;
+      staleStats.set(civilization, {
+        civilization,
+        winRate: numberValue(item.winRate, item.win_rate) ?? 50,
+        pickRate: numberValue(item.pickRate, item.pick_rate) ?? 100,
+      });
+    }
+    if (
+      staleStats.size &&
+      updatedAt &&
+      Date.now() - updatedAt.getTime() < GLOBAL_STATS_CACHE_MS
+    ) {
+      return staleStats;
+    }
+  } catch (error) {
+    logger.warn("Could not read cached civilization stats", { ratingFilter: ratingFilter ?? "all", error });
+  }
+
   const url = new URL(`${API_BASE}/stats/rm_solo/civilizations`);
   applyRatingFilter(url, ratingFilter);
-  const payload = await fetchJson<{ data?: unknown[] }>(url);
-  const stats = new Map<string, CivStat>();
-  for (const raw of arrayValue(payload.data)) {
-    const item = record(raw);
-    const civilization = stringValue(item.civilization);
-    if (!civilization) continue;
-    stats.set(civilization, {
-      civilization,
-      winRate: numberValue(item.win_rate, item.winRate) ?? 50,
-      pickRate: numberValue(item.pick_rate, item.pickRate) ?? 100,
-    });
+  try {
+    const payload = await fetchJson<{ data?: unknown[] }>(url);
+    const stats = new Map<string, CivStat>();
+    for (const raw of arrayValue(payload.data)) {
+      const item = record(raw);
+      const civilization = stringValue(item.civilization);
+      if (!civilization) continue;
+      stats.set(civilization, {
+        civilization,
+        winRate: numberValue(item.win_rate, item.winRate) ?? 50,
+        pickRate: numberValue(item.pick_rate, item.pickRate) ?? 100,
+      });
+    }
+    if (!stats.size && staleStats.size) {
+      logger.warn("Using stale civilization stats after an empty refresh", {
+        ratingFilter: ratingFilter ?? "all",
+      });
+      return staleStats;
+    }
+    if (stats.size) {
+      await cacheRef
+        .set(
+          {
+            updatedAt: FieldValue.serverTimestamp(),
+            ratingFilter: ratingFilter ?? null,
+            stats: Array.from(stats.values()),
+          },
+          { merge: true },
+        )
+        .catch((error) =>
+          logger.warn("Could not persist civilization stats cache", { ratingFilter: ratingFilter ?? "all", error }),
+        );
+    }
+    return stats;
+  } catch (error) {
+    if (staleStats.size) {
+      logger.warn("Using stale civilization stats after refresh failure", {
+        ratingFilter: ratingFilter ?? "all",
+        error,
+      });
+      return staleStats;
+    }
+    throw error;
   }
-  return stats;
 }
 
 async function loadMatchupStats(ratingFilter?: string) {
+  const cacheRef = db
+    .collection("meta")
+    .doc(ratingFilter ? "matchupStats1700Cache" : "matchupStatsAllCache");
+  const staleStats = new Map<string, MatchupStat>();
+  try {
+    const snapshot = await cacheRef.get();
+    const data = snapshot.data();
+    const updatedAt = data?.updatedAt instanceof Timestamp ? data.updatedAt.toDate() : null;
+    for (const raw of arrayValue(data?.stats)) {
+      const item = record(raw);
+      const civilization = stringValue(item.civilization);
+      const otherCivilization = stringValue(item.otherCivilization, item.other_civilization);
+      if (!civilization || !otherCivilization) continue;
+      staleStats.set(`${civilization}|${otherCivilization}`, {
+        civilization,
+        otherCivilization,
+        winRate: numberValue(item.winRate, item.win_rate) ?? 50,
+        gamesCount: intValue(item.gamesCount, item.games_count) ?? 0,
+      });
+    }
+    if (
+      staleStats.size &&
+      updatedAt &&
+      Date.now() - updatedAt.getTime() < GLOBAL_STATS_CACHE_MS
+    ) {
+      return staleStats;
+    }
+  } catch (error) {
+    logger.warn("Could not read cached matchup stats", { ratingFilter: ratingFilter ?? "all", error });
+  }
+
   const url = new URL(`${API_BASE}/stats/rm_solo/matchups`);
   applyRatingFilter(url, ratingFilter);
-  const payload = await fetchJson<{ data?: unknown[] }>(url);
-  const stats = new Map<string, MatchupStat>();
-  for (const raw of arrayValue(payload.data)) {
-    const item = record(raw);
-    const civilization = stringValue(item.civilization);
-    const otherCivilization = stringValue(item.other_civilization, item.otherCivilization);
-    if (!civilization || !otherCivilization) continue;
-    const stat = {
-      civilization,
-      otherCivilization,
-      winRate: numberValue(item.win_rate, item.winRate) ?? 50,
-      gamesCount: intValue(item.games_count, item.gamesCount) ?? 0,
-    };
-    stats.set(`${civilization}|${otherCivilization}`, stat);
+  try {
+    const payload = await fetchJson<{ data?: unknown[] }>(url);
+    const stats = new Map<string, MatchupStat>();
+    for (const raw of arrayValue(payload.data)) {
+      const item = record(raw);
+      const civilization = stringValue(item.civilization);
+      const otherCivilization = stringValue(item.other_civilization, item.otherCivilization);
+      if (!civilization || !otherCivilization) continue;
+      const stat = {
+        civilization,
+        otherCivilization,
+        winRate: numberValue(item.win_rate, item.winRate) ?? 50,
+        gamesCount: intValue(item.games_count, item.gamesCount) ?? 0,
+      };
+      stats.set(`${civilization}|${otherCivilization}`, stat);
+    }
+    if (!stats.size && staleStats.size) {
+      logger.warn("Using stale matchup stats after an empty refresh", {
+        ratingFilter: ratingFilter ?? "all",
+      });
+      return staleStats;
+    }
+    if (stats.size) {
+      await cacheRef
+        .set(
+          {
+            updatedAt: FieldValue.serverTimestamp(),
+            ratingFilter: ratingFilter ?? null,
+            stats: Array.from(stats.values()),
+          },
+          { merge: true },
+        )
+        .catch((error) =>
+          logger.warn("Could not persist matchup stats cache", { ratingFilter: ratingFilter ?? "all", error }),
+        );
+    }
+    return stats;
+  } catch (error) {
+    if (staleStats.size) {
+      logger.warn("Using stale matchup stats after refresh failure", {
+        ratingFilter: ratingFilter ?? "all",
+        error,
+      });
+      return staleStats;
+    }
+    throw error;
   }
-  return stats;
 }
 
 function serializeAgeupStats(stats: Map<string, AgeupStat>) {
@@ -1874,7 +2226,15 @@ async function loadAgeupStats() {
       const schemaVersion = intValue(data.schemaVersion) ?? 1;
       const freshEnough = updatedAt.getTime() > Date.now() - AGEUP_STATS_MAX_AGE_DAYS * 24 * 60 * 60 * 1000;
       const cached = hydrateAgeupStats(data.stats);
-      if (schemaVersion === AGEUP_STATS_SCHEMA_VERSION && freshEnough && cached.size) return cached;
+      if (schemaVersion === AGEUP_STATS_SCHEMA_VERSION && cached.size) {
+        if (!freshEnough) {
+          logger.warn("Using stale cached ageup stats until the dedicated refresh succeeds", {
+            updatedAt: updatedAt.toISOString(),
+            count: cached.size,
+          });
+        }
+        return cached;
+      }
     }
   } catch (error) {
     logger.warn("Could not load cached ageup stats", { error });
@@ -1935,7 +2295,12 @@ function nextPlayerOffset(startOffset: number, batchesChecked: number, playerCou
   return (startOffset + batchesChecked * BATCH_SIZE) % playerCount;
 }
 
-async function fetchCandidateGames(profileIds: string[], since: Date, excludedGameIds = new Set<string>(), startPlayerOffset = 0) {
+async function fetchCandidateGames(
+  profileIds: string[],
+  since: Date,
+  excludedGameIds = new Set<string>(),
+  startPlayerOffset = 0,
+) {
   const games = new Map<string, AoeGame>();
   const normalizedStartOffset = profileIds.length ? Math.max(0, startPlayerOffset) % profileIds.length : 0;
   const rotatedProfileIds = rotateProfileIds(profileIds, normalizedStartOffset);
@@ -1943,7 +2308,7 @@ async function fetchCandidateGames(profileIds: string[], since: Date, excludedGa
     apiRequestsMade: 0,
     rawGamesFetched: 0,
     skippedAlreadyExcluded: 0,
-    skippedLowRating: 0,
+    skippedLowMmr: 0,
     skippedInvalid: 0,
     eligibleGamesCollected: 0,
     freshGamesCollected: 0,
@@ -1958,8 +2323,10 @@ async function fetchCandidateGames(profileIds: string[], since: Date, excludedGa
     return diagnostics.apiRequestsMade >= MAX_GAME_REQUESTS_PER_SCAN && games.size >= MIN_FRESH_GAMES_BEFORE_STOPPING;
   }
 
-  for (let index = 0; index < rotatedProfileIds.length; index += BATCH_SIZE) {
-    const batch = rotatedProfileIds.slice(index, index + BATCH_SIZE);
+  const batches = Array.from({ length: Math.ceil(rotatedProfileIds.length / BATCH_SIZE) }, (_, index) =>
+    rotatedProfileIds.slice(index * BATCH_SIZE, (index + 1) * BATCH_SIZE),
+  );
+  for (const batch of batches) {
     diagnostics.playerBatchesChecked += 1;
     diagnostics.nextPlayerOffset = nextPlayerOffset(normalizedStartOffset, diagnostics.playerBatchesChecked, profileIds.length);
     const base = new URL(`${API_BASE}/games`);
@@ -1991,8 +2358,8 @@ async function fetchCandidateGames(profileIds: string[], since: Date, excludedGa
           diagnostics.skippedAlreadyExcluded += 1;
           continue;
         }
-        if ((game.averageRating ?? 0) < MIN_RATING && (game.averageMmr ?? 0) < MIN_RATING) {
-          diagnostics.skippedLowRating += 1;
+        if (!game.players.some((player) => player.mmr != null && player.mmr >= MIN_MMR)) {
+          diagnostics.skippedLowMmr += 1;
           continue;
         }
         games.set(game.aoe4worldGameId, game);
@@ -2085,21 +2452,30 @@ async function runScan(forcePlayers = false, options: { allowDeepFallback?: bool
     const expiredOutliersPruned = await pruneExpiredFallback();
     const primarySince = new Date(Date.now() - PRIMARY_LOOKBACK_HOURS * 60 * 60 * 1000);
     const expandedSince = new Date(Date.now() - CANDIDATE_LOOKBACK_HOURS * 60 * 60 * 1000);
-    const [profileIds, civStats, eliteCivStats, matchupStats, eliteMatchupStats, ageupStats] = await Promise.all([
-      refreshTrackedPlayersIfNeeded(forcePlayers),
+    const [discoveryPool, civStats, eliteCivStats, matchupStats, eliteMatchupStats, ageupStats, scanStateSnapshot] =
+      await Promise.all([
+      loadMmrDiscoveryPool(forcePlayers),
       loadCivStats(),
       loadCivStats(">1700"),
       loadMatchupStats(),
       loadMatchupStats(">1700"),
       loadAgeupStats(),
+      SCAN_STATE_DOC.get(),
     ]);
-    const excludedGameIds = await loadExcludedGameIds(expandedSince);
-    const scanStateSnapshot = await SCAN_STATE_DOC.get();
     const scanState = scanStateSnapshot.data();
+    const excludedGameIds = await loadExcludedGameIds(expandedSince);
     const startPlayerOffset = intValue(scanState?.nextPlayerOffset) ?? 0;
+    const startMainPlayerOffset = intValue(scanState?.nextMainPlayerOffset) ?? 0;
+    const startMainMmrProbeOffset = intValue(scanState?.nextMainMmrProbeOffset) ?? 0;
 
-    const primaryFetch = await fetchCandidateGames(profileIds, primarySince, excludedGameIds, startPlayerOffset);
+    const primaryFetch = await fetchCandidateGames(
+      discoveryPool.scanProfileIds,
+      primarySince,
+      excludedGameIds,
+      startPlayerOffset,
+    );
     const primaryGames = primaryFetch.games;
+    const profileIds = discoveryPool.scanProfileIds;
     let games = primaryGames;
     let fetchDiagnostics = primaryFetch.diagnostics;
     let expandedFetchDiagnostics: FetchDiagnostics | null = null;
@@ -2108,7 +2484,7 @@ async function runScan(forcePlayers = false, options: { allowDeepFallback?: bool
     let lookbackHours = PRIMARY_LOOKBACK_HOURS;
     let expanded = false;
 
-    if (options.allowDeepFallback !== false && selection.selected.length < GAMES_TO_SAVE_PER_SCAN) {
+    if (options.allowDeepFallback !== false && profileIds.length && selection.selected.length < GAMES_TO_SAVE_PER_SCAN) {
       const expandedFetch = await fetchCandidateGames(
         profileIds,
         expandedSince,
@@ -2125,6 +2501,19 @@ async function runScan(forcePlayers = false, options: { allowDeepFallback?: bool
       expanded = true;
     }
 
+    const mainDiscoveryGames = Array.from(
+      new Map([...primaryGames, ...games].map((game) => [game.aoe4worldGameId, game])).values(),
+    );
+    const mainMmrProbe = await probeCivilizationMainsByLatestMmr(
+      discoveryPool.candidateProfileIds,
+      startMainMmrProbeOffset,
+    );
+    const trackedMmrPlayers = await rememberTrackedMmrPlayers(
+      discoveryPool.trackedProfileIds,
+      mainDiscoveryGames,
+      mainMmrProbe.players,
+    );
+    const mainDiscovery = await refreshDiscoveredCivilizationMains(mainDiscoveryGames, startMainPlayerOffset);
     const selectedWithCivilizationMains = await enrichSelectedCandidatesWithCivilizationMains(selection.selected);
 
     for (const candidate of selectedWithCivilizationMains) {
@@ -2160,7 +2549,7 @@ async function runScan(forcePlayers = false, options: { allowDeepFallback?: bool
     const totalRawGamesFetched = primaryFetch.diagnostics.rawGamesFetched + (expandedFetchDiagnostics?.rawGamesFetched ?? 0);
     const totalSkippedAlreadyExcluded =
       primaryFetch.diagnostics.skippedAlreadyExcluded + (expandedFetchDiagnostics?.skippedAlreadyExcluded ?? 0);
-    const totalSkippedLowRating = primaryFetch.diagnostics.skippedLowRating + (expandedFetchDiagnostics?.skippedLowRating ?? 0);
+    const totalSkippedLowMmr = primaryFetch.diagnostics.skippedLowMmr + (expandedFetchDiagnostics?.skippedLowMmr ?? 0);
     const totalSkippedInvalid = primaryFetch.diagnostics.skippedInvalid + (expandedFetchDiagnostics?.skippedInvalid ?? 0);
     const totalEligibleGamesCollected =
       primaryFetch.diagnostics.eligibleGamesCollected + (expandedFetchDiagnostics?.eligibleGamesCollected ?? 0);
@@ -2176,10 +2565,21 @@ async function runScan(forcePlayers = false, options: { allowDeepFallback?: bool
           lastCursor: now,
           lastCheckedSince: Timestamp.fromDate(expanded ? expandedSince : primarySince),
           nextPlayerOffset: fetchDiagnostics.nextPlayerOffset,
+          nextMainPlayerOffset: mainDiscovery.nextOffset,
+          nextMainMmrProbeOffset: mainMmrProbe.nextOffset,
         },
         { merge: true },
       ),
-      PUBLIC_STATUS_DOC.set({ lastSuccessfulScanAt: now, lastScanMessage: message, trackedPlayers: profileIds.length }, { merge: true }),
+      PUBLIC_STATUS_DOC.set(
+        {
+          lastSuccessfulScanAt: now,
+          lastScanMessage: message,
+          trackedPlayers: trackedMmrPlayers.profileIds.length,
+          trackedPlayerMetric: "mmr",
+          minTrackedMmr: MIN_MMR,
+        },
+        { merge: true },
+      ),
       scanRef.set(
         {
           status: "success",
@@ -2197,6 +2597,17 @@ async function runScan(forcePlayers = false, options: { allowDeepFallback?: bool
           selectedGameIds,
           selectedGameUrls,
           storedCount: selectedWithCivilizationMains.length,
+          trackedPlayerMetric: "mmr",
+          minTrackedMmr: MIN_MMR,
+          trackedPlayers: trackedMmrPlayers.profileIds.length,
+          discoveryCandidates: discoveryPool.candidateProfileIds.length,
+          discoveryCandidateRatingFloor: DISCOVERY_RATING_FLOOR,
+          discoveredMmrPlayers: trackedMmrPlayers.discoveredPlayers,
+          mainDiscoveryChecked: mainDiscovery.checked,
+          mainDiscoveryQualified: mainDiscovery.qualified,
+          mainMmrProbeChecked: mainMmrProbe.checked,
+          mainMmrProbeQualifying: mainMmrProbe.qualifyingMmr,
+          mainMmrProbeQualifiedMains: mainMmrProbe.qualifiedMains,
           summaryFinalistsChecked: selection.finalists.length,
           excludedGames: excludedGameIds.size,
           rejectedCached,
@@ -2212,10 +2623,10 @@ async function runScan(forcePlayers = false, options: { allowDeepFallback?: bool
           skippedAlreadyExcluded: fetchDiagnostics.skippedAlreadyExcluded,
           primarySkippedAlreadyExcluded: primaryFetch.diagnostics.skippedAlreadyExcluded,
           expandedSkippedAlreadyExcluded: expandedFetchDiagnostics?.skippedAlreadyExcluded ?? 0,
-          totalSkippedLowRating,
-          skippedLowRating: fetchDiagnostics.skippedLowRating,
-          primarySkippedLowRating: primaryFetch.diagnostics.skippedLowRating,
-          expandedSkippedLowRating: expandedFetchDiagnostics?.skippedLowRating ?? 0,
+          totalSkippedLowMmr,
+          skippedLowMmr: fetchDiagnostics.skippedLowMmr,
+          primarySkippedLowMmr: primaryFetch.diagnostics.skippedLowMmr,
+          expandedSkippedLowMmr: expandedFetchDiagnostics?.skippedLowMmr ?? 0,
           totalSkippedInvalid,
           skippedInvalid: fetchDiagnostics.skippedInvalid,
           primarySkippedInvalid: primaryFetch.diagnostics.skippedInvalid,
@@ -2242,8 +2653,11 @@ async function runScan(forcePlayers = false, options: { allowDeepFallback?: bool
         { merge: true },
       ),
     ]);
-    const publicSnapshotRefreshed = selectedGameIds.length > 0 || expiredOutliersPruned > 0;
-    const metaSnapshotCounts = publicSnapshotRefreshed ? await updatePublicMetaSnapshots() : null;
+    const mainsSnapshotRefreshed = mainDiscovery.checked > 0 || mainMmrProbe.profileLookups > 0;
+    const publicSnapshotRefreshed = selectedGameIds.length > 0 || expiredOutliersPruned > 0 || mainsSnapshotRefreshed;
+    const metaSnapshotCounts = publicSnapshotRefreshed
+      ? await updatePublicMetaSnapshots({ includeCivilizationMains: selectedGameIds.length > 0 || mainsSnapshotRefreshed })
+      : null;
     const archiveSnapshotCount = metaSnapshotCounts?.archiveSnapshotCount ?? null;
 
     return {
@@ -2261,6 +2675,17 @@ async function runScan(forcePlayers = false, options: { allowDeepFallback?: bool
       selectedGameIds,
       selectedGameUrls,
       storedCount: selectedWithCivilizationMains.length,
+      trackedPlayerMetric: "mmr",
+      minTrackedMmr: MIN_MMR,
+      trackedPlayers: trackedMmrPlayers.profileIds.length,
+      discoveryCandidates: discoveryPool.candidateProfileIds.length,
+      discoveryCandidateRatingFloor: DISCOVERY_RATING_FLOOR,
+      discoveredMmrPlayers: trackedMmrPlayers.discoveredPlayers,
+      mainDiscoveryChecked: mainDiscovery.checked,
+      mainDiscoveryQualified: mainDiscovery.qualified,
+      mainMmrProbeChecked: mainMmrProbe.checked,
+      mainMmrProbeQualifying: mainMmrProbe.qualifyingMmr,
+      mainMmrProbeQualifiedMains: mainMmrProbe.qualifiedMains,
       summaryFinalistsChecked: selection.finalists.length,
       excludedGames: excludedGameIds.size,
       rejectedCached,
@@ -2276,10 +2701,10 @@ async function runScan(forcePlayers = false, options: { allowDeepFallback?: bool
       skippedAlreadyExcluded: fetchDiagnostics.skippedAlreadyExcluded,
       primarySkippedAlreadyExcluded: primaryFetch.diagnostics.skippedAlreadyExcluded,
       expandedSkippedAlreadyExcluded: expandedFetchDiagnostics?.skippedAlreadyExcluded ?? 0,
-      totalSkippedLowRating,
-      skippedLowRating: fetchDiagnostics.skippedLowRating,
-      primarySkippedLowRating: primaryFetch.diagnostics.skippedLowRating,
-      expandedSkippedLowRating: expandedFetchDiagnostics?.skippedLowRating ?? 0,
+      totalSkippedLowMmr,
+      skippedLowMmr: fetchDiagnostics.skippedLowMmr,
+      primarySkippedLowMmr: primaryFetch.diagnostics.skippedLowMmr,
+      expandedSkippedLowMmr: expandedFetchDiagnostics?.skippedLowMmr ?? 0,
       totalSkippedInvalid,
       skippedInvalid: fetchDiagnostics.skippedInvalid,
       primarySkippedInvalid: primaryFetch.diagnostics.skippedInvalid,
@@ -2476,6 +2901,13 @@ async function updateArchiveSnapshot() {
       ),
     });
   }
+  batch.set(HOMEPAGE_HIGHLIGHTS_DOC, {
+    updatedAt: FieldValue.serverTimestamp(),
+    schemaVersion: 1,
+    count: Math.min(games.length, HOMEPAGE_HIGHLIGHT_CANDIDATE_LIMIT),
+    sourceCount: games.length,
+    games: games.slice(0, HOMEPAGE_HIGHLIGHT_CANDIDATE_LIMIT),
+  });
   await batch.commit();
   return games.length;
 }
@@ -2486,13 +2918,14 @@ async function updateCivilizationMainsSnapshot() {
     .map((document) => {
       const data = record(document.data());
       const main = storedCivilizationMain(data.main);
-      if (!main) return null;
+      const mmr = intValue(data.mmr);
+      if (!main || mmr == null || mmr < MIN_MMR) return null;
       return {
         profileId: stringValue(data.profileId) ?? document.id,
         name: stringValue(data.name) ?? `Player ${document.id}`,
         civilization: stringValue(data.civilization),
         rating: intValue(data.rating),
-        mmr: intValue(data.mmr),
+        mmr,
         inputType: stringValue(data.inputType),
         social: socialLinks(data.social),
         main,
@@ -2506,16 +2939,18 @@ async function updateCivilizationMainsSnapshot() {
     updatedAt: FieldValue.serverTimestamp(),
     count: players.length,
     limit: CIVILIZATION_MAINS_SNAPSHOT_LIMIT,
+    minMmr: MIN_MMR,
     players,
   });
 
   return players.length;
 }
 
-async function updatePublicMetaSnapshots() {
+async function updatePublicMetaSnapshots(options: { includeCivilizationMains?: boolean } = {}) {
+  const includeCivilizationMains = options.includeCivilizationMains !== false;
   const [archiveSnapshotCount, civilizationMainsSnapshotCount] = await Promise.all([
     updateArchiveSnapshot(),
-    updateCivilizationMainsSnapshot(),
+    includeCivilizationMains ? updateCivilizationMainsSnapshot() : Promise.resolve(null),
   ]);
   return { archiveSnapshotCount, civilizationMainsSnapshotCount };
 }

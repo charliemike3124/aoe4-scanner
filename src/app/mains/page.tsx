@@ -20,8 +20,7 @@ export default function CivilizationMainsPage() {
       <AppNav />
       <section className="app-shell py-12 sm:py-16">
         <header className="mb-9">
-          <p className="eyebrow">Player directory</p>
-          <h1 className="mt-3 text-4xl font-semibold tracking-[-0.035em] text-[#e8e3d4] sm:text-5xl">Civilization mains</h1>
+          <h1 className="text-4xl font-semibold tracking-[-0.035em] text-[#e8e3d4] sm:text-5xl">Civilization mains</h1>
           <p className="mt-3 max-w-2xl text-sm leading-6 text-[#9ea097] sm:text-base">
             Find experienced specialists and compare their recent performance.
           </p>

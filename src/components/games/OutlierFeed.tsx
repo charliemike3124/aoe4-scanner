@@ -48,6 +48,31 @@ const HIGHLIGHT_MAX_AGE_MS = 48 * 60 * 60 * 1000;
 const HIGHLIGHT_CANDIDATE_LIMIT = 25;
 const HIGHLIGHT_COUNT = 5;
 
+function readStorageValue(key: string) {
+  try {
+    return localStorage.getItem(key);
+  } catch {
+    return null;
+  }
+}
+
+function readJsonCache<T>(key: string): T | null {
+  try {
+    const value = localStorage.getItem(key);
+    return value ? (JSON.parse(value) as T) : null;
+  } catch {
+    return null;
+  }
+}
+
+function writeStorageValue(key: string, value: string) {
+  try {
+    localStorage.setItem(key, value);
+  } catch {
+    // Browser storage is an optional optimization.
+  }
+}
+
 function serializeGame(game: OutlierGame) {
   return {
     ...game,
@@ -293,8 +318,8 @@ export function OutlierFeed({
 
   useEffect(() => {
     setBookmarks(readBookmarks());
-    setLastSeenAt(Number(localStorage.getItem(LAST_SEEN_KEY) ?? 0));
-    setSpoilerLight(localStorage.getItem(SPOILER_KEY) === 'true');
+    setLastSeenAt(Number(readStorageValue(LAST_SEEN_KEY) ?? 0));
+    setSpoilerLight(readStorageValue(SPOILER_KEY) === 'true');
 
     function onBookmarksChanged() {
       setBookmarks(readBookmarks());
@@ -312,49 +337,46 @@ export function OutlierFeed({
       setLoading(true);
       setError(null);
       try {
-        const cached = localStorage.getItem(key);
-        if (cached) {
-          const parsed = JSON.parse(cached) as {
-            storedAt: number;
-            games: ReturnType<typeof serializeGame>[];
-            status: {
-              lastSuccessfulScanAt?: string | null;
-              lastScanMessage?: string | null;
-              trackedPlayers?: number | null;
-            };
-            archiveCount?: number;
-            archiveShardCount?: number;
-            loadedArchiveShards?: number;
+        const parsed = readJsonCache<{
+          storedAt: number;
+          games: ReturnType<typeof serializeGame>[];
+          status: {
+            lastSuccessfulScanAt?: string | null;
+            lastScanMessage?: string | null;
+            trackedPlayers?: number | null;
           };
-          if (Date.now() - parsed.storedAt < CACHE_TTL_MS) {
-            setGames(parsed.games.map(hydrateGame));
-            setStatus({
-              ...parsed.status,
-              lastSuccessfulScanAt: parsed.status.lastSuccessfulScanAt
-                ? new Date(parsed.status.lastSuccessfulScanAt)
-                : null,
-            });
-            setArchiveCount(parsed.archiveCount ?? parsed.games.length);
-            setArchiveShardCount(parsed.archiveShardCount ?? 1);
-            setLoadedArchiveShards(parsed.loadedArchiveShards ?? 1);
-            setLoading(false);
-            return;
-          }
+          archiveCount?: number;
+          archiveShardCount?: number;
+          loadedArchiveShards?: number;
+        }>(key);
+        if (parsed && Date.now() - parsed.storedAt < CACHE_TTL_MS) {
+          setGames(parsed.games.map(hydrateGame));
+          setStatus({
+            ...parsed.status,
+            lastSuccessfulScanAt: parsed.status.lastSuccessfulScanAt
+              ? new Date(parsed.status.lastSuccessfulScanAt)
+              : null,
+          });
+          setArchiveCount(parsed.archiveCount ?? parsed.games.length);
+          setArchiveShardCount(parsed.archiveShardCount ?? 1);
+          setLoadedArchiveShards(parsed.loadedArchiveShards ?? 1);
+          setLoading(false);
+          return;
         }
 
         const fetchLimit = mode === 'archive' ? 250 : showHighlights ? HIGHLIGHT_CANDIDATE_LIMIT : pageSize ?? 15;
         const gamesQuery = query(collection(db, 'outlierGames'), orderBy('selectedAt', 'desc'), limit(fetchLimit));
-        const archiveSnapshotPromise = mode === 'archive'
-          ? getDoc(doc(db, 'meta', 'archiveSnapshot')).catch(() => null)
-          : Promise.resolve(null);
-        const [archiveSnapshot, statusSnapshot] = await Promise.all([
-          archiveSnapshotPromise,
+        const feedSnapshotPromise = getDoc(
+          doc(db, 'meta', mode === 'archive' ? 'archiveSnapshot' : 'homepageHighlights'),
+        ).catch(() => null);
+        const [feedSnapshot, statusSnapshot] = await Promise.all([
+          feedSnapshotPromise,
           getDoc(doc(db, 'meta', 'publicStatus')),
         ]);
         if (cancelled) return;
         let nextGames =
-          archiveSnapshot?.exists() && Array.isArray(archiveSnapshot.data().games)
-            ? (archiveSnapshot.data().games as unknown[]).map((game) => hydrateGame(game as Record<string, unknown>))
+          feedSnapshot?.exists() && Array.isArray(feedSnapshot.data().games)
+            ? (feedSnapshot.data().games as unknown[]).map((game) => hydrateGame(game as Record<string, unknown>))
             : [];
         if (!nextGames.length) {
           const snapshot = await getDocs(gamesQuery);
@@ -362,13 +384,13 @@ export function OutlierFeed({
           nextGames = snapshot.docs.map((gameDoc) => outlierFromSnapshot(gameDoc));
         }
         nextGames = nextGames.sort(newestPickedFirst).slice(0, fetchLimit);
-        const archiveData = archiveSnapshot?.exists() ? archiveSnapshot.data() : undefined;
+        const archiveData = mode === 'archive' && feedSnapshot?.exists() ? feedSnapshot.data() : undefined;
         const nextArchiveCount =
           mode === 'archive' ? Number(archiveData?.count ?? nextGames.length) : nextGames.length;
         const nextArchiveShardCount =
           mode === 'archive' ? Math.max(1, Number(archiveData?.shardCount ?? 1)) : 1;
         const nextStatus = statusFromData(statusSnapshot.data());
-        localStorage.setItem(
+        writeStorageValue(
           key,
           JSON.stringify({
             storedAt: Date.now(),
@@ -509,7 +531,7 @@ export function OutlierFeed({
     if (!visibleGames.length) return;
     const maxSelectedAt = Math.max(...visibleGames.map((game) => game.selectedAt.getTime()));
     const timeout = window.setTimeout(() => {
-      localStorage.setItem(LAST_SEEN_KEY, String(maxSelectedAt));
+      writeStorageValue(LAST_SEEN_KEY, String(maxSelectedAt));
       setLastSeenAt(maxSelectedAt);
     }, 2000);
 
@@ -526,7 +548,7 @@ export function OutlierFeed({
   function toggleSpoilerLight() {
     const next = !spoilerLight;
     setSpoilerLight(next);
-    localStorage.setItem(SPOILER_KEY, String(next));
+    writeStorageValue(SPOILER_KEY, String(next));
   }
 
   const countLabel =

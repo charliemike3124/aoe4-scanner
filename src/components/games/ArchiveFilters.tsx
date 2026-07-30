@@ -57,7 +57,10 @@ export function ArchiveFilters({
 
   useEffect(() => {
     const cached = readCachedMapPool();
-    if (cached?.length) setMaps(cached);
+    if (cached?.length) {
+      setMaps(cached);
+      return;
+    }
 
     let cancelled = false;
     async function loadMapPool() {

@@ -12,6 +12,8 @@ type AutocompletePlayer = {
 
 const AUTOCOMPLETE_CACHE_PREFIX = "aoe4scanner:player-autocomplete:";
 const AUTOCOMPLETE_CACHE_TTL_MS = 60 * 60 * 1000;
+const AUTOCOMPLETE_REQUEST_TIMEOUT_MS = 8 * 1000;
+const AUTOCOMPLETE_MAX_CACHE_ENTRIES = 24;
 const autocompleteMemoryCache = new Map<string, { storedAt: number; players: AutocompletePlayer[] }>();
 
 function rankLabel(value?: string | null) {
@@ -39,8 +41,31 @@ function writeCachedPlayers(query: string, players: AutocompletePlayer[]) {
   const key = query.toLowerCase();
   const entry = { storedAt: Date.now(), players };
   autocompleteMemoryCache.set(key, entry);
+  while (autocompleteMemoryCache.size > AUTOCOMPLETE_MAX_CACHE_ENTRIES) {
+    const oldestKey = autocompleteMemoryCache.keys().next().value;
+    if (typeof oldestKey !== "string") break;
+    autocompleteMemoryCache.delete(oldestKey);
+  }
   try {
     localStorage.setItem(`${AUTOCOMPLETE_CACHE_PREFIX}${key}`, JSON.stringify(entry));
+    const cachedEntries: Array<{ key: string; storedAt: number }> = [];
+    for (let index = 0; index < localStorage.length; index += 1) {
+      const storageKey = localStorage.key(index);
+      if (!storageKey?.startsWith(AUTOCOMPLETE_CACHE_PREFIX)) continue;
+      try {
+        const cached = JSON.parse(localStorage.getItem(storageKey) ?? "") as { storedAt?: unknown };
+        cachedEntries.push({
+          key: storageKey,
+          storedAt: typeof cached.storedAt === "number" ? cached.storedAt : 0,
+        });
+      } catch {
+        cachedEntries.push({ key: storageKey, storedAt: 0 });
+      }
+    }
+    cachedEntries
+      .sort((a, b) => b.storedAt - a.storedAt)
+      .slice(AUTOCOMPLETE_MAX_CACHE_ENTRIES)
+      .forEach((cached) => localStorage.removeItem(cached.key));
   } catch {
     // Cache writes are best-effort.
   }
@@ -85,7 +110,9 @@ export function PlayerAutocompleteInput({ defaultValue }: { defaultValue?: strin
     }
 
     const controller = new AbortController();
+    let requestTimeout: number | undefined;
     const timeout = window.setTimeout(async () => {
+      requestTimeout = window.setTimeout(() => controller.abort(), AUTOCOMPLETE_REQUEST_TIMEOUT_MS);
       try {
         const response = await fetch(
           `https://aoe4world.com/api/v0/players/autocomplete?leaderboard=rm_solo&query=${encodeURIComponent(query)}&limit=6`,
@@ -99,12 +126,15 @@ export function PlayerAutocompleteInput({ defaultValue }: { defaultValue?: strin
         setOpen(true);
       } catch (error) {
         if ((error as Error).name !== "AbortError") setPlayers([]);
+      } finally {
+        if (requestTimeout != null) window.clearTimeout(requestTimeout);
       }
     }, 350);
 
     return () => {
       controller.abort();
       window.clearTimeout(timeout);
+      if (requestTimeout != null) window.clearTimeout(requestTimeout);
     };
   }, [value]);
 
