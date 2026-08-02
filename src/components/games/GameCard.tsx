@@ -9,6 +9,7 @@ import { ScorePill } from "@/components/games/ScorePill";
 import { buttonClassName } from "@/components/ui/button";
 import { Tooltip } from "@/components/ui/tooltip";
 import { formatCivilization, formatDuration } from "@/lib/format";
+import { CIVILIZATION_MAIN_MIN_MMR } from "@/lib/civilizationMains";
 import type { OutlierGame } from "@/lib/types";
 import { cn } from "@/lib/utils";
 
@@ -371,17 +372,25 @@ export function GameCard({
                       <div>
                         <CivilizationPill civilization={participant.civilization} />
                       </div>
-                      {participant.civilizationMain ? (
+                      {(participant.mmr != null && participant.mmr >= CIVILIZATION_MAIN_MIN_MMR
+                        ? participant.civilizationMains?.length
+                          ? participant.civilizationMains
+                          : participant.civilizationMain
+                            ? [participant.civilizationMain]
+                            : []
+                        : []
+                      ).map((main) => (
                         <a
+                          key={`${participant.profileId}-${main.civilization}`}
                           href={`${playerPageUrl(participant)}?leaderboard=rm_solo#civilizations`}
                           target="_blank"
                           rel="noreferrer"
                           className="rounded-sm border border-gold/30 bg-gold/10 px-2 py-0.5 text-xs font-semibold text-gold transition hover:border-gold/50 hover:bg-gold/15"
-                          title={`${formatCivilization(participant.civilizationMain.civilization)} main: ${formatPercent(participant.civilizationMain.pickRate)} pick rate across ${participant.civilizationMain.gamesCount} games`}
+                          title={`${formatCivilization(main.civilization)} main: ${formatPercent(main.pickRate)} pick rate across ${main.gamesCount} games`}
                         >
-                          {formatCivilization(participant.civilizationMain.civilization)} main · {formatPercent(participant.civilizationMain.pickRate)} · {participant.civilizationMain.gamesCount}g
+                          {formatCivilization(main.civilization)} main · {formatPercent(main.pickRate)} · {main.gamesCount}g
                         </a>
-                      ) : null}
+                      ))}
                       <div className="flex flex-wrap items-center gap-2">
                         <span className="rounded-sm border border-white/10 bg-white/[0.03] px-2 py-0.5 text-xs text-slate-300">
                           Elo {formatRating(participant.rating)}

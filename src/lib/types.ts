@@ -13,6 +13,7 @@ export type GameParticipant = {
   name: string;
   civilization: string | null;
   civilizationMain?: CivilizationMain | null;
+  civilizationMains?: CivilizationMain[];
   rating: number | null;
   mmr: number | null;
   ratingDiff: number | null;

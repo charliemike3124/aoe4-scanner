@@ -25,6 +25,7 @@ const IGNORED_COLLECTION = db.collection("ignoredGames");
 // AOE4World has no public MMR leaderboard. Rating only bounds the candidate
 // index; observed player and game eligibility is always decided by MMR.
 const MIN_MMR = 1700;
+const MIN_CIV_MAIN_MMR = 1500;
 const DISCOVERY_RATING_FLOOR = 1400;
 const MAX_DISCOVERY_LEADERBOARD_PAGES = 50;
 const DISCOVERY_CACHE_HOURS = 20;
@@ -61,10 +62,11 @@ const AGEUP_STATS_SCHEMA_VERSION = 4;
 const AGEUP_ANALYTICS_KIND = "rm_solo";
 const RARE_LANDMARK_MAX_PICK_RATE = 40;
 const CIVILIZATION_MAIN_PICK_RATE = 35;
-const CIVILIZATION_MAIN_MIN_GAMES = 20;
+const CIVILIZATION_MAIN_MIN_GAMES = 25;
 const CIVILIZATION_MAIN_HIGH_PICK_RATE = 75;
+const CIVILIZATION_MAIN_HIGH_MIN_GAMES = 10;
 const CIVILIZATION_MAIN_CACHE_HOURS = 24;
-const CIVILIZATION_MAIN_RULE_VERSION = 2;
+const CIVILIZATION_MAIN_RULE_VERSION = 3;
 const AOE4WORLD_REQUEST_TIMEOUT_MS = 15 * 1000;
 const AOE4WORLD_MAX_RETRY_DELAY_MS = 15 * 1000;
 const MAP_CIV_STAT_CACHE_MS = 6 * 60 * 60 * 1000;
@@ -103,6 +105,7 @@ type AoePlayer = {
   name: string;
   civilization: string | null;
   civilizationMain?: CivilizationMain | null;
+  civilizationMains?: CivilizationMain[];
   rating: number | null;
   mmr: number | null;
   ratingDiff: number | null;
@@ -303,7 +306,14 @@ function socialLinks(value: unknown) {
   return links;
 }
 
-function parseCivilizationMain(rawCivilizations: unknown): CivilizationMain | null {
+function qualifiesCivilizationMain(main: CivilizationMain) {
+  return (
+    (main.pickRate >= CIVILIZATION_MAIN_HIGH_PICK_RATE && main.gamesCount >= CIVILIZATION_MAIN_HIGH_MIN_GAMES) ||
+    (main.pickRate >= CIVILIZATION_MAIN_PICK_RATE && main.gamesCount >= CIVILIZATION_MAIN_MIN_GAMES)
+  );
+}
+
+function parseCivilizationMains(rawCivilizations: unknown): CivilizationMain[] {
   const mains = arrayValue(rawCivilizations)
     .map((raw) => {
       const stat = record(raw);
@@ -320,20 +330,16 @@ function parseCivilizationMain(rawCivilizations: unknown): CivilizationMain | nu
       };
     })
     .filter((main): main is CivilizationMain => Boolean(main))
-    .filter(
-      (main) =>
-        main.pickRate >= CIVILIZATION_MAIN_HIGH_PICK_RATE ||
-        (main.pickRate >= CIVILIZATION_MAIN_PICK_RATE && main.gamesCount >= CIVILIZATION_MAIN_MIN_GAMES),
-    )
+    .filter(qualifiesCivilizationMain)
     .sort((a, b) => b.pickRate - a.pickRate || b.gamesCount - a.gamesCount);
 
-  return mains[0] ?? null;
+  return mains;
 }
 
-function civilizationMainFromPlayerProfile(payload: unknown): CivilizationMain | null {
+function civilizationMainsFromPlayerProfile(payload: unknown): CivilizationMain[] {
   const modes = record(record(payload).modes);
   const rmSolo = record(modes.rm_solo);
-  return parseCivilizationMain(rmSolo.civilizations);
+  return parseCivilizationMains(rmSolo.civilizations);
 }
 
 function retryDelayMs(response: Response | null, attempt: number) {
@@ -423,7 +429,8 @@ async function checkReplayAvailability(gameId: string): Promise<ReplayAvailabili
   }
 }
 
-async function loadPlayerCivilizationMain(player: AoePlayer): Promise<CivilizationMain | null> {
+async function loadPlayerCivilizationMains(player: AoePlayer): Promise<CivilizationMain[]> {
+  if (player.mmr == null || player.mmr < MIN_CIV_MAIN_MMR) return [];
   const ref = PLAYER_CIVILIZATION_MAIN_COLLECTION.doc(player.profileId);
   const snapshot = await ref.get();
   const data = snapshot.data();
@@ -443,12 +450,12 @@ async function loadPlayerCivilizationMain(player: AoePlayer): Promise<Civilizati
       },
       { merge: true },
     );
-    return (data?.main as CivilizationMain | null | undefined) ?? null;
+    return storedCivilizationMains(data?.mains, data?.main);
   }
 
   const url = new URL(`${API_BASE}/players/${player.profileId}`);
   const payload = await fetchJson<unknown>(url);
-  const main = civilizationMainFromPlayerProfile(payload);
+  const mains = civilizationMainsFromPlayerProfile(payload);
   await ref.set(
     {
       profileId: player.profileId,
@@ -458,41 +465,46 @@ async function loadPlayerCivilizationMain(player: AoePlayer): Promise<Civilizati
       mmr: player.mmr,
       inputType: player.inputType,
       social: player.social,
-      main,
+      mains,
+      main: mains[0] ?? null,
       lastSeenAt: FieldValue.serverTimestamp(),
       thresholds: {
         pickRate: CIVILIZATION_MAIN_PICK_RATE,
         gamesCount: CIVILIZATION_MAIN_MIN_GAMES,
         highPickRate: CIVILIZATION_MAIN_HIGH_PICK_RATE,
+        highGamesCount: CIVILIZATION_MAIN_HIGH_MIN_GAMES,
+        minMmr: MIN_CIV_MAIN_MMR,
       },
       ruleVersion: CIVILIZATION_MAIN_RULE_VERSION,
       refreshedAt: FieldValue.serverTimestamp(),
     },
     { merge: true },
   );
-  return main;
+  return mains;
 }
 
 async function enrichGamePlayersWithCivilizationMains(game: AoeGame) {
   const enrichedPlayers: AoePlayer[] = [];
-  const distinctLookups = new Map<string, Promise<CivilizationMain | null>>();
+  const distinctLookups = new Map<string, Promise<CivilizationMain[]>>();
 
   for (const player of game.players) {
     if (!distinctLookups.has(player.profileId)) {
       distinctLookups.set(
         player.profileId,
-        loadPlayerCivilizationMain(player).catch((error) => {
+        loadPlayerCivilizationMains(player).catch((error) => {
           logger.debug("Player civilization main lookup skipped", { profileId: player.profileId, error });
-          return null;
+          return [];
         }),
       );
     }
   }
 
   for (const player of game.players) {
+    const civilizationMains = (await distinctLookups.get(player.profileId)) ?? [];
     enrichedPlayers.push({
       ...player,
-      civilizationMain: (await distinctLookups.get(player.profileId)) ?? null,
+      civilizationMains,
+      civilizationMain: civilizationMains[0] ?? null,
     });
   }
 
@@ -1707,14 +1719,18 @@ async function loadMmrDiscoveryPool(force = false) {
   };
 }
 
-function highMmrPlayersFromGames(games: AoeGame[]) {
+function playersAtOrAboveMmrFromGames(games: AoeGame[], minimumMmr: number) {
   const players = new Map<string, AoePlayer>();
   for (const game of games) {
     for (const player of game.players) {
-      if (player.mmr != null && player.mmr >= MIN_MMR) players.set(player.profileId, player);
+      if (player.mmr != null && player.mmr >= minimumMmr) players.set(player.profileId, player);
     }
   }
   return Array.from(players.values());
+}
+
+function highMmrPlayersFromGames(games: AoeGame[]) {
+  return playersAtOrAboveMmrFromGames(games, MIN_MMR);
 }
 
 async function rememberTrackedMmrPlayers(
@@ -1789,13 +1805,13 @@ async function probeCivilizationMainsByLatestMmr(candidateProfileIds: string[], 
       url.searchParams.set("limit", "1");
       const payload = await fetchJson<{ games?: unknown[] }>(url, 1);
       const player = playerFromRawGame(arrayValue(payload.games)[0], profileId);
-      if (!player || player.mmr == null || player.mmr < MIN_MMR) {
+      if (!player || player.mmr == null || player.mmr < MIN_CIV_MAIN_MMR) {
         await sleep(250);
         continue;
       }
       qualifyingPlayers.push(player);
       profileLookups += 1;
-      if (await loadPlayerCivilizationMain(player)) qualifiedMains += 1;
+      if ((await loadPlayerCivilizationMains(player)).length) qualifiedMains += 1;
     } catch (error) {
       logger.debug("Latest-MMR civilization main probe skipped", { profileId, error });
     }
@@ -1813,7 +1829,7 @@ async function probeCivilizationMainsByLatestMmr(candidateProfileIds: string[], 
 }
 
 async function refreshDiscoveredCivilizationMains(games: AoeGame[], startOffset = 0) {
-  const players = highMmrPlayersFromGames(games);
+  const players = playersAtOrAboveMmrFromGames(games, MIN_CIV_MAIN_MMR);
   if (!players.length) return { checked: 0, qualified: 0, nextOffset: 0 };
 
   const normalizedOffset = Math.max(0, startOffset) % players.length;
@@ -1834,11 +1850,11 @@ async function refreshDiscoveredCivilizationMains(games: AoeGame[], startOffset 
   const selectedPlayers = playersNeedingRefresh.slice(0, MAIN_DISCOVERY_PLAYERS_PER_SCAN);
   let qualified = 0;
   for (const player of selectedPlayers) {
-    const main = await loadPlayerCivilizationMain(player).catch((error) => {
+    const mains = await loadPlayerCivilizationMains(player).catch((error) => {
       logger.debug("Discovered player civilization main lookup skipped", { profileId: player.profileId, error });
-      return null;
+      return [];
     });
-    if (main) qualified += 1;
+    if (mains.length) qualified += 1;
     await sleep(250);
   }
 
@@ -2762,16 +2778,43 @@ function storedCivilizationMain(value: unknown): CivilizationMain | null {
   };
 }
 
+function storedCivilizationMains(...values: unknown[]) {
+  const mains = new Map<string, CivilizationMain>();
+  for (const value of values) {
+    const candidates = Array.isArray(value) ? value : [value];
+    for (const candidate of candidates) {
+      const main = storedCivilizationMain(candidate);
+      if (!main || !qualifiesCivilizationMain(main)) continue;
+      const existing = mains.get(main.civilization);
+      if (!existing || main.pickRate > existing.pickRate || main.gamesCount > existing.gamesCount) {
+        mains.set(main.civilization, main);
+      }
+    }
+  }
+  return Array.from(mains.values()).sort((a, b) => b.pickRate - a.pickRate || b.gamesCount - a.gamesCount);
+}
+
 function storedGameFromData(id: string, data: AnyRecord): AoeGame {
   const players = arrayValue(data.players).map((raw, index) => {
     const player = record(raw);
+    const mmr = intValue(player.mmr);
+    const civilizationMains =
+      mmr != null && mmr >= MIN_CIV_MAIN_MMR
+        ? storedCivilizationMains(
+            player.civilizationMains,
+            player.civilization_mains,
+            player.civilizationMain,
+            player.civilization_main,
+          )
+        : [];
     return {
       profileId: stringValue(player.profileId, player.profile_id) ?? crypto.randomUUID(),
       name: stringValue(player.name) ?? "Unknown player",
       civilization: stringValue(player.civilization),
-      civilizationMain: storedCivilizationMain(player.civilizationMain ?? player.civilization_main),
+      civilizationMains,
+      civilizationMain: civilizationMains[0] ?? null,
       rating: intValue(player.rating),
-      mmr: intValue(player.mmr),
+      mmr,
       ratingDiff: intValue(player.ratingDiff, player.rating_diff),
       mmrDiff: intValue(player.mmrDiff, player.mmr_diff),
       result: stringValue(player.result),
@@ -2915,12 +2958,12 @@ async function updateArchiveSnapshot() {
 async function updateCivilizationMainsSnapshot() {
   const snapshot = await PLAYER_CIVILIZATION_MAIN_COLLECTION.limit(CIVILIZATION_MAINS_SNAPSHOT_LIMIT).get();
   const players = snapshot.docs
-    .map((document) => {
+    .flatMap((document) => {
       const data = record(document.data());
-      const main = storedCivilizationMain(data.main);
+      const mains = storedCivilizationMains(data.mains, data.main);
       const mmr = intValue(data.mmr);
-      if (!main || mmr == null || mmr < MIN_MMR) return null;
-      return {
+      if (!mains.length || mmr == null || mmr < MIN_CIV_MAIN_MMR) return [];
+      return mains.map((main) => ({
         profileId: stringValue(data.profileId) ?? document.id,
         name: stringValue(data.name) ?? `Player ${document.id}`,
         civilization: stringValue(data.civilization),
@@ -2930,16 +2973,22 @@ async function updateCivilizationMainsSnapshot() {
         social: socialLinks(data.social),
         main,
         lastSeenAt: data.lastSeenAt ?? data.refreshedAt ?? null,
-      };
+      }));
     })
-    .filter((player): player is NonNullable<typeof player> => Boolean(player))
     .sort((a, b) => b.main.pickRate - a.main.pickRate || b.main.gamesCount - a.main.gamesCount);
 
   await CIVILIZATION_MAINS_SNAPSHOT_DOC.set({
     updatedAt: FieldValue.serverTimestamp(),
     count: players.length,
     limit: CIVILIZATION_MAINS_SNAPSHOT_LIMIT,
-    minMmr: MIN_MMR,
+    minMmr: MIN_CIV_MAIN_MMR,
+    ruleVersion: CIVILIZATION_MAIN_RULE_VERSION,
+    thresholds: {
+      pickRate: CIVILIZATION_MAIN_PICK_RATE,
+      gamesCount: CIVILIZATION_MAIN_MIN_GAMES,
+      highPickRate: CIVILIZATION_MAIN_HIGH_PICK_RATE,
+      highGamesCount: CIVILIZATION_MAIN_HIGH_MIN_GAMES,
+    },
     players,
   });
 

@@ -10,6 +10,7 @@ import { CIVILIZATION_FLAGS, CIVILIZATIONS, type Civilization } from "@/lib/aoe4
 import { formatCivilization } from "@/lib/format";
 import { db } from "@/lib/firebase";
 import { cn } from "@/lib/utils";
+import { CIVILIZATION_MAIN_MIN_MMR, qualifiesAsCivilizationMain } from "@/lib/civilizationMains";
 import { Tooltip } from "@/components/ui/tooltip";
 
 type MainPlayer = {
@@ -31,8 +32,7 @@ type MainPlayer = {
   latestMatchAt: Date | null;
 };
 
-const MIN_TRACKED_MMR = 1700;
-const DIRECTORY_CACHE_KEY = "aoe4scanner:civilization-mains:v2";
+const DIRECTORY_CACHE_KEY = "aoe4scanner:civilization-mains:v3";
 const DIRECTORY_CACHE_TTL_MS = 6 * 60 * 60 * 1000;
 
 function dateValue(value: Timestamp | Date | string | null | undefined) {
@@ -46,18 +46,32 @@ function numberValue(value: unknown) {
   return typeof value === "number" && Number.isFinite(value) ? value : null;
 }
 
-function mainPlayerFromData(data: Record<string, unknown>, fallbackId: string): MainPlayer | null {
-  const main = data.main as Record<string, unknown> | null | undefined;
-  const mmr = numberValue(data.mmr);
-  if (
-    mmr == null ||
-    mmr < MIN_TRACKED_MMR ||
-    !main?.civilization ||
-    typeof main.pickRate !== "number" ||
-    typeof main.gamesCount !== "number"
-  )
-    return null;
+function mainStatFromData(value: unknown): MainPlayer["main"] | null {
+  if (!value || typeof value !== "object") return null;
+  const main = value as Record<string, unknown>;
+  if (typeof main.civilization !== "string" || typeof main.pickRate !== "number" || typeof main.gamesCount !== "number") return null;
+  if (!qualifiesAsCivilizationMain(main.pickRate, main.gamesCount)) return null;
   return {
+    civilization: main.civilization,
+    pickRate: main.pickRate,
+    gamesCount: main.gamesCount,
+    winRate: numberValue(main.winRate),
+  };
+}
+
+function mainPlayersFromData(data: Record<string, unknown>, fallbackId: string): MainPlayer[] {
+  const mmr = numberValue(data.mmr);
+  if (mmr == null || mmr < CIVILIZATION_MAIN_MIN_MMR) return [];
+  const rawMains = Array.isArray(data.mains) ? data.mains : [data.main];
+  const mains = Array.from(
+    new Map(
+      rawMains
+        .map(mainStatFromData)
+        .filter((main): main is MainPlayer["main"] => Boolean(main))
+        .map((main) => [main.civilization, main]),
+    ).values(),
+  );
+  return mains.map((main) => ({
     profileId: String(data.profileId ?? fallbackId),
     name: String(data.name ?? `Player ${fallbackId}`),
     civilization: typeof data.civilization === "string" ? data.civilization : null,
@@ -65,16 +79,15 @@ function mainPlayerFromData(data: Record<string, unknown>, fallbackId: string): 
     mmr,
     inputType: typeof data.inputType === "string" ? data.inputType : null,
     social: data.social && typeof data.social === "object" ? (data.social as Record<string, string>) : {},
-    main: {
-      civilization: String(main.civilization),
-      pickRate: Number(main.pickRate),
-      gamesCount: Number(main.gamesCount),
-      winRate: numberValue(main.winRate),
-    },
+    main,
     lastSeenAt: dateValue((data.lastSeenAt ?? data.refreshedAt) as Timestamp | Date | string | null | undefined),
     archivedMatches: 0,
     latestMatchAt: null,
-  };
+  }));
+}
+
+function mainPlayerKey(player: Pick<MainPlayer, "profileId" | "main">) {
+  return `${player.profileId}|${player.main.civilization}`;
 }
 
 function readCachedDirectory() {
@@ -87,7 +100,7 @@ function readCachedDirectory() {
     };
     if (Date.now() - cached.storedAt > DIRECTORY_CACHE_TTL_MS) return null;
     return cached.players
-      .filter((player) => player.mmr != null && player.mmr >= MIN_TRACKED_MMR)
+      .filter((player) => player.mmr != null && player.mmr >= CIVILIZATION_MAIN_MIN_MMR)
       .map((player) => ({
         ...player,
         lastSeenAt: player.lastSeenAt ? new Date(player.lastSeenAt) : null,
@@ -295,8 +308,7 @@ export function CivilizationMainsDirectory() {
         const snapshotPlayers =
           publicSnapshot?.exists() && Array.isArray(publicSnapshot.data().players)
             ? (publicSnapshot.data().players as Record<string, unknown>[])
-                .map((data, index) => mainPlayerFromData(data, String(index)))
-                .filter((player): player is MainPlayer => Boolean(player))
+                .flatMap((data, index) => mainPlayersFromData(data, String(index)))
             : [];
         if (snapshotPlayers.length) {
           cacheDirectory(snapshotPlayers);
@@ -313,9 +325,10 @@ export function CivilizationMainsDirectory() {
 
         directorySnapshot?.docs.forEach((document) => {
           const data = document.data();
-          const player = mainPlayerFromData(data, document.id);
-          if (!player) return;
-          merged.set(player.profileId, mergePlayer(merged.get(player.profileId), player));
+          mainPlayersFromData(data, document.id).forEach((player) => {
+            const key = mainPlayerKey(player);
+            merged.set(key, mergePlayer(merged.get(key), player));
+          });
         });
 
         archiveSnapshot?.docs.forEach((document) => {
@@ -323,37 +336,30 @@ export function CivilizationMainsDirectory() {
           const startedAt = dateValue(data.startedAt);
           if (!Array.isArray(data.players)) return;
           data.players.forEach((rawPlayer: Record<string, unknown>) => {
-            const main = rawPlayer.civilizationMain;
-            if (!main || typeof main !== "object") return;
-            const mainData = main as Record<string, unknown>;
-            if (
-              typeof mainData.civilization !== "string" ||
-              typeof mainData.pickRate !== "number" ||
-              typeof mainData.gamesCount !== "number"
-            )
-              return;
             const profileId = String(rawPlayer.profileId ?? "");
             const mmr = numberValue(rawPlayer.mmr);
-            if (!profileId || mmr == null || mmr < MIN_TRACKED_MMR) return;
-            const player: MainPlayer = {
-              profileId,
-              name: String(rawPlayer.name ?? "Unknown player"),
-              civilization: typeof rawPlayer.civilization === "string" ? rawPlayer.civilization : null,
-              rating: numberValue(rawPlayer.rating),
-              mmr,
-              inputType: typeof rawPlayer.inputType === "string" ? rawPlayer.inputType : null,
-              social: rawPlayer.social && typeof rawPlayer.social === "object" ? (rawPlayer.social as Record<string, string>) : {},
-              main: {
-                civilization: mainData.civilization,
-                pickRate: mainData.pickRate,
-                gamesCount: mainData.gamesCount,
-                winRate: numberValue(mainData.winRate),
-              },
-              lastSeenAt: startedAt,
-              archivedMatches: 1,
-              latestMatchAt: startedAt,
-            };
-            merged.set(profileId, mergePlayer(merged.get(profileId), player));
+            if (!profileId || mmr == null || mmr < CIVILIZATION_MAIN_MIN_MMR) return;
+            const rawMains = Array.isArray(rawPlayer.civilizationMains)
+              ? rawPlayer.civilizationMains
+              : [rawPlayer.civilizationMain];
+            rawMains.map(mainStatFromData).forEach((main) => {
+              if (!main) return;
+              const player: MainPlayer = {
+                profileId,
+                name: String(rawPlayer.name ?? "Unknown player"),
+                civilization: typeof rawPlayer.civilization === "string" ? rawPlayer.civilization : null,
+                rating: numberValue(rawPlayer.rating),
+                mmr,
+                inputType: typeof rawPlayer.inputType === "string" ? rawPlayer.inputType : null,
+                social: rawPlayer.social && typeof rawPlayer.social === "object" ? (rawPlayer.social as Record<string, string>) : {},
+                main,
+                lastSeenAt: startedAt,
+                archivedMatches: 1,
+                latestMatchAt: startedAt,
+              };
+              const key = mainPlayerKey(player);
+              merged.set(key, mergePlayer(merged.get(key), player));
+            });
           });
         });
 
@@ -479,7 +485,7 @@ export function CivilizationMainsDirectory() {
       ) : filteredPlayers.length ? (
         <div className="grid gap-4 md:grid-cols-2">
           {filteredPlayers.map((player) => (
-            <MainPlayerCard key={player.profileId} player={player} />
+            <MainPlayerCard key={mainPlayerKey(player)} player={player} />
           ))}
         </div>
       ) : (

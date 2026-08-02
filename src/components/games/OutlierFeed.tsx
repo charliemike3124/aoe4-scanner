@@ -15,6 +15,7 @@ import { EmptyState } from '@/components/games/EmptyState';
 import { LoadingState } from '@/components/games/LoadingState';
 import { ScrollToTopButton } from '@/components/ScrollToTopButton';
 import { db } from '@/lib/firebase';
+import { CIVILIZATION_MAIN_MIN_MMR } from '@/lib/civilizationMains';
 import { outlierFromSnapshot, statusFromData } from '@/lib/firestoreConverters';
 import type { OutlierGame, PublicStatus } from '@/lib/types';
 
@@ -144,9 +145,13 @@ function matchesClientFilters(game: OutlierGame, filters: FeedFilters, bookmarks
   if (filters.civMainsOnly) {
     const mainCivilization = filters.civilization ?? filters.opponentCivilization;
     const hasMatchingMain = game.players.some((player) => {
-      const mainCiv = player.civilizationMain?.civilization;
-      if (!mainCiv) return false;
-      if (player.civilization !== mainCiv) return false;
+      if (player.mmr == null || player.mmr < CIVILIZATION_MAIN_MIN_MMR) return false;
+      const mains = player.civilizationMains?.length
+        ? player.civilizationMains
+        : player.civilizationMain
+          ? [player.civilizationMain]
+          : [];
+      if (!mains.some((main) => main.civilization === player.civilization)) return false;
       return mainCivilization ? player.civilization === mainCivilization : true;
     });
     if (!hasMatchingMain) return false;

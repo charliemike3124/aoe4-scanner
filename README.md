@@ -9,8 +9,10 @@ AOE4Scanner is a static Next.js frontend backed by Firebase Hosting, Firestore, 
 - Uses the ranked leaderboard only as a broad discovery index down to 1400 rating because AOE4World does not expose an MMR leaderboard; rating never determines final eligibility.
 - Scans a limited batch of recent games with conservative delays and accepts games when at least one participant has an observed MMR of 1700 or higher.
 - Scores outlier candidates such as MMR upsets, bad matchup wins, low-win-rate civilization wins, map disadvantage wins, unusual game lengths, comeback signals, villager/resource deficits, and summary-based efficiency signals.
-- Refreshes civilization-main profiles for newly observed 1700+ MMR players independently of whether their match becomes a saved outlier.
-- Rotates through a small cached latest-ranked-game probe so established 1700+ MMR mains can be discovered even when they have not played inside the current scan window.
+- Detects civilization mains at 1500+ observed MMR: either 75%+ pick rate across at least 10 games, or 35%+ across at least 25 games.
+- Allows every civilization that meets those rules to be recorded as a main for the same player.
+- Refreshes civilization-main profiles independently of whether their match becomes a saved outlier.
+- Rotates through a small cached latest-ranked-game probe so established 1500+ MMR mains can be discovered even when they have not played inside the current scan window.
 - Saves qualifying games in Firestore for the public feed and archive.
 - Keeps saved games for roughly two weeks with Firestore TTL and an expiration cleanup fallback.
 - Caches non-qualifying games briefly so future scans do less repeated work.
