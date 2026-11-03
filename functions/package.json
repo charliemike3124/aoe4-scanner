@@ -8,9 +8,10 @@
     "deploy": "npm run build && firebase deploy --only functions"
   },
   "engines": {
-    "node": "20"
+    "node": "22"
   },
   "dependencies": {
+    "aoe4-scanner": "file:..",
     "firebase-admin": "^12.7.0",
     "firebase-functions": "^6.1.2"
   },
