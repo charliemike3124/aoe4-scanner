@@ -19,8 +19,10 @@ export const CIVILIZATIONS = [
   "order_of_the_dragon",
   "ottomans",
   "rus",
+  "scots",
   "sengoku_daimyo",
   "tughlaq_dynasty",
+  "vikings",
   "zhu_xis_legacy",
 ] as const;
 
@@ -47,8 +49,10 @@ export const CIVILIZATION_FLAGS: Record<Civilization, string> = {
   order_of_the_dragon: "/civilizations/order_of_the_dragon.webp",
   ottomans: "/civilizations/ottomans.webp",
   rus: "/civilizations/rus.webp",
+  scots: "/civilizations/scots.webp",
   sengoku_daimyo: "/civilizations/sengoku_daimyo.webp",
   tughlaq_dynasty: "/civilizations/tughlaq_dynasty.webp",
+  vikings: "/civilizations/vikings.webp",
   zhu_xis_legacy: "/civilizations/zhu_xis_legacy.webp",
 };
 

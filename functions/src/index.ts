@@ -58,7 +58,7 @@ const REPLAY_RETRY_AFTER_HOURS = 24;
 const CIVILIZATION_MAINS_SNAPSHOT_LIMIT = 1000;
 const PUBLIC_META_QUERY_LIMIT = 500;
 const AGEUP_STATS_MAX_AGE_DAYS = 10;
-const AGEUP_STATS_SCHEMA_VERSION = 4;
+const AGEUP_STATS_SCHEMA_VERSION = 5;
 const AGEUP_ANALYTICS_KIND = "rm_solo";
 const RARE_LANDMARK_MAX_PICK_RATE = 40;
 const CIVILIZATION_MAIN_PICK_RATE = 35;
@@ -93,8 +93,10 @@ const AGEUP_ANALYTICS_CIVILIZATIONS = [
   "order_of_the_dragon",
   "ottomans",
   "rus",
+  "scots",
   "sengoku_daimyo",
   "tughlaq_dynasty",
+  "vikings",
   "zhu_xis_legacy",
 ];
 
